@@ -1,0 +1,468 @@
+import {
+  S3Client,
+  ListObjectsV2Command,
+  ListObjectVersionsCommand,
+  HeadObjectCommand,
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  RestoreObjectCommand,
+  CopyObjectCommand,
+  PutBucketVersioningCommand,
+  GetBucketLocationCommand
+} from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { createReadStream, createWriteStream, statSync } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import type { Readable } from 'node:stream';
+import { fromEnv, fromIni } from '@aws-sdk/credential-providers';
+import { config as loadEnv } from 'dotenv';
+import { join } from 'node:path';
+import {
+  AppConfig,
+  BucketAnalytics,
+  RestoreRequest,
+  S3Object,
+  S3ObjectVersion,
+  StorageClass,
+  TierStats,
+  UploadProgress,
+  UploadRequest
+} from '@shared/types';
+
+// Load .env from the project root (works in both dev and packaged app)
+loadEnv({ path: join(__dirname, '../../.env') });
+
+// Threshold above which we switch to multipart upload (5 MB chunks).
+// AWS allows multipart down to 5 MB parts; below that single PutObject is fine.
+const MULTIPART_THRESHOLD = 5 * 1024 * 1024;
+const PART_SIZE = 5 * 1024 * 1024;
+
+export class S3Service {
+  private client: S3Client;
+  private bucket: string;
+
+  constructor(config: AppConfig) {
+    this.bucket = config.bucket;
+    // Use explicit providers so the SDK never falls through to EC2 IMDS,
+    // which hangs indefinitely on non-EC2 machines.
+    const credentials = config.profile
+      ? fromIni({ profile: config.profile })
+      : (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)
+        ? fromEnv()
+        : fromIni(); // reads ~/.aws/credentials default profile only
+    this.client = new S3Client({ region: config.region, credentials });
+  }
+
+  /**
+   * List objects under a prefix. We treat "/" as the folder separator
+   * since S3 has no real folders — this is just a UX convention.
+   */
+  async list(prefix = ''): Promise<{ folders: string[]; files: S3Object[] }> {
+    const folders: string[] = [];
+    const files: S3Object[] = [];
+    let continuationToken: string | undefined;
+
+    do {
+      const res = await this.client.send(new ListObjectsV2Command({
+        Bucket: this.bucket,
+        Prefix: prefix,
+        Delimiter: '/',
+        ContinuationToken: continuationToken
+      }));
+
+      for (const cp of res.CommonPrefixes ?? []) {
+        if (cp.Prefix) folders.push(cp.Prefix);
+      }
+      for (const obj of res.Contents ?? []) {
+        if (!obj.Key || obj.Key === prefix) continue; // skip the prefix marker itself
+        files.push({
+          key: obj.Key,
+          size: obj.Size ?? 0,
+          lastModified: (obj.LastModified ?? new Date()).toISOString(),
+          storageClass: obj.StorageClass ?? 'STANDARD',
+          etag: obj.ETag
+        });
+      }
+      continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined;
+    } while (continuationToken);
+
+    return { folders, files };
+  }
+
+  /**
+   * Search across the entire bucket by listing everything and filtering client-side.
+   * For real Drive-scale search you'd want OpenSearch or S3 Inventory + Athena,
+   * but for v1 this works up to a few thousand objects.
+   */
+  async search(query: string): Promise<S3Object[]> {
+    const lower = query.toLowerCase();
+    const matches: S3Object[] = [];
+    let continuationToken: string | undefined;
+
+    do {
+      const res = await this.client.send(new ListObjectsV2Command({
+        Bucket: this.bucket,
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000
+      }));
+
+      for (const obj of res.Contents ?? []) {
+        if (!obj.Key) continue;
+        if (obj.Key.toLowerCase().includes(lower)) {
+          matches.push({
+            key: obj.Key,
+            size: obj.Size ?? 0,
+            lastModified: (obj.LastModified ?? new Date()).toISOString(),
+            storageClass: obj.StorageClass ?? 'STANDARD',
+            etag: obj.ETag
+          });
+        }
+      }
+      continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined;
+    } while (continuationToken && matches.length < 500); // hard cap
+
+    return matches;
+  }
+
+  /**
+   * Upload with progress callbacks. Uses multipart for files >= 5 MB.
+   * The user-chosen storage class is set at upload time — this is the cheap path.
+   * Changing storage class later requires a CopyObject (we expose that separately).
+   */
+  async upload(
+    req: UploadRequest,
+    onProgress: (p: UploadProgress) => void
+  ): Promise<void> {
+    const stat = statSync(req.localPath);
+    const stream = createReadStream(req.localPath);
+
+    try {
+      if (stat.size >= MULTIPART_THRESHOLD) {
+        const uploader = new Upload({
+          client: this.client,
+          partSize: PART_SIZE,
+          queueSize: 4, // 4 concurrent parts is a reasonable default for desktop bandwidth
+          params: {
+            Bucket: this.bucket,
+            Key: req.key,
+            Body: stream,
+            StorageClass: req.storageClass
+          }
+        });
+
+        uploader.on('httpUploadProgress', (p) => {
+          onProgress({
+            key: req.key,
+            loaded: p.loaded ?? 0,
+            total: p.total ?? stat.size,
+            done: false
+          });
+        });
+
+        await uploader.done();
+      } else {
+        // For small files, single PutObject through the Upload helper
+        // (still works, just won't multipart).
+        const uploader = new Upload({
+          client: this.client,
+          params: {
+            Bucket: this.bucket,
+            Key: req.key,
+            Body: stream,
+            StorageClass: req.storageClass
+          }
+        });
+        await uploader.done();
+        onProgress({ key: req.key, loaded: stat.size, total: stat.size, done: false });
+      }
+
+      onProgress({ key: req.key, loaded: stat.size, total: stat.size, done: true });
+    } catch (err) {
+      onProgress({
+        key: req.key,
+        loaded: 0,
+        total: stat.size,
+        done: true,
+        error: err instanceof Error ? err.message : String(err)
+      });
+      throw err;
+    }
+  }
+
+  /**
+   * Download an object to a local path. Streams to disk so we don't load
+   * giant files into memory.
+   */
+  async download(key: string, localPath: string, versionId?: string): Promise<void> {
+    const res = await this.client.send(new GetObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      VersionId: versionId
+    }));
+
+    if (!res.Body) throw new Error('Empty response body');
+    const body = res.Body as Readable;
+    await pipeline(body, createWriteStream(localPath));
+  }
+
+  /**
+   * Generate a pre-signed URL for sharing. Default expiry is 1 hour;
+   * AWS caps this at 7 days for SigV4 with IAM user credentials.
+   */
+  async presign(key: string, expiresInSeconds = 3600): Promise<string> {
+    const cmd = new GetObjectCommand({ Bucket: this.bucket, Key: key });
+    return getSignedUrl(this.client, cmd, { expiresIn: expiresInSeconds });
+  }
+
+  async delete(key: string, versionId?: string): Promise<void> {
+    await this.client.send(new DeleteObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      VersionId: versionId
+    }));
+  }
+
+  /**
+   * List all versions of a key. Requires bucket versioning to be enabled —
+   * if it isn't, you'll only get the current version.
+   */
+  async listVersions(key: string): Promise<S3ObjectVersion[]> {
+    const res = await this.client.send(new ListObjectVersionsCommand({
+      Bucket: this.bucket,
+      Prefix: key
+    }));
+
+    return (res.Versions ?? [])
+      .filter(v => v.Key === key)
+      .map(v => ({
+        key: v.Key!,
+        versionId: v.VersionId ?? 'null',
+        size: v.Size ?? 0,
+        lastModified: (v.LastModified ?? new Date()).toISOString(),
+        isLatest: v.IsLatest ?? false,
+        storageClass: v.StorageClass ?? 'STANDARD'
+      }));
+  }
+
+  /**
+   * Restore an old version by copying it on top of the current key.
+   * S3 doesn't have "make this version current" — copy-self is the idiom.
+   */
+  async restoreVersion(key: string, versionId: string): Promise<void> {
+    await this.client.send(new CopyObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      CopySource: `${this.bucket}/${encodeURIComponent(key)}?versionId=${versionId}`
+    }));
+  }
+
+  /**
+   * For Glacier / Deep Archive objects: initiate a restore so the data
+   * becomes temporarily downloadable. This does NOT change the storage class —
+   * it creates a temporary copy in Standard for `days` days.
+   */
+  async initiateGlacierRestore(req: RestoreRequest): Promise<void> {
+    await this.client.send(new RestoreObjectCommand({
+      Bucket: this.bucket,
+      Key: req.key,
+      VersionId: req.versionId,
+      RestoreRequest: {
+        Days: req.days,
+        GlacierJobParameters: { Tier: req.tier }
+      }
+    }));
+  }
+
+  /**
+   * Check the restore status of an archived object.
+   * Returns { ongoing: boolean, expiry?: Date }
+   */
+  async checkRestoreStatus(key: string, versionId?: string): Promise<{
+    ongoing: boolean;
+    expiry?: string;
+    storageClass?: string;
+  }> {
+    const res = await this.client.send(new HeadObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      VersionId: versionId
+    }));
+
+    // The Restore header looks like: ongoing-request="false", expiry-date="Wed, 21 Oct 2026 07:28:00 GMT"
+    const restoreHeader = res.Restore ?? '';
+    const ongoing = restoreHeader.includes('ongoing-request="true"');
+    const expiryMatch = restoreHeader.match(/expiry-date="([^"]+)"/);
+
+    return {
+      ongoing,
+      expiry: expiryMatch ? new Date(expiryMatch[1]).toISOString() : undefined,
+      storageClass: res.StorageClass ?? 'STANDARD'
+    };
+  }
+
+  /**
+   * Change the storage class of an existing object via copy-in-place.
+   * The new storage class only applies to the new copy.
+   */
+  async changeStorageClass(key: string, newClass: StorageClass): Promise<void> {
+    await this.client.send(new CopyObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      CopySource: `${this.bucket}/${encodeURIComponent(key)}`,
+      StorageClass: newClass,
+      MetadataDirective: 'COPY'
+    }));
+  }
+
+  // Storage cost per GB/month in USD (us-east-1 list prices, storage only).
+  private static readonly COST_PER_GB: Record<string, number> = {
+    STANDARD:             0.023,
+    INTELLIGENT_TIERING:  0.023,
+    STANDARD_IA:          0.0125,
+    ONEZONE_IA:           0.01,
+    GLACIER_IR:           0.004,
+    GLACIER:              0.0036,
+    DEEP_ARCHIVE:         0.00099,
+  };
+
+  async getAnalytics(): Promise<BucketAnalytics> {
+    const CAP = 50_000;
+    const tierMap = new Map<string, { count: number; bytes: number }>();
+    const all: S3Object[] = [];
+    let token: string | undefined;
+
+    do {
+      const res = await this.client.send(new ListObjectsV2Command({
+        Bucket: this.bucket,
+        ContinuationToken: token,
+        MaxKeys: 1000
+      }));
+
+      for (const obj of res.Contents ?? []) {
+        if (!obj.Key) continue;
+        const sc = obj.StorageClass ?? 'STANDARD';
+        const size = obj.Size ?? 0;
+        const entry = tierMap.get(sc) ?? { count: 0, bytes: 0 };
+        entry.count++;
+        entry.bytes += size;
+        tierMap.set(sc, entry);
+        all.push({
+          key: obj.Key,
+          size,
+          lastModified: (obj.LastModified ?? new Date()).toISOString(),
+          storageClass: sc,
+          etag: obj.ETag
+        });
+      }
+
+      token = res.IsTruncated ? res.NextContinuationToken : undefined;
+    } while (token && all.length < CAP);
+
+    const byTier: TierStats[] = Array.from(tierMap.entries())
+      .map(([sc, s]) => ({
+        storageClass: sc,
+        count: s.count,
+        totalBytes: s.bytes,
+        estimatedMonthlyCost: (s.bytes / 1024 ** 3) * (S3Service.COST_PER_GB[sc] ?? 0.023)
+      }))
+      .sort((a, b) => b.totalBytes - a.totalBytes);
+
+    const totalBytes = all.reduce((n, o) => n + o.size, 0);
+    const estimatedMonthlyCost = byTier.reduce((n, t) => n + t.estimatedMonthlyCost, 0);
+
+    const largestFiles = [...all].sort((a, b) => b.size - a.size).slice(0, 10);
+    const recentFiles  = [...all]
+      .sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime())
+      .slice(0, 10);
+
+    return {
+      totalObjects: all.length,
+      totalBytes,
+      estimatedMonthlyCost,
+      byTier,
+      largestFiles,
+      recentFiles,
+      scannedAt: new Date().toISOString(),
+      capped: all.length >= CAP
+    };
+  }
+
+  /**
+   * Verify that credentials, bucket name, and region are all correct.
+   * Called before saving config so we surface problems immediately.
+   */
+  async testConnection(onLog?: (msg: string) => void): Promise<void> {
+    const log = (msg: string) => { console.log(`[S3] ${msg}`); onLog?.(msg); };
+    const logErr = (msg: string) => { console.error(`[S3] ${msg}`); onLog?.(`ERROR: ${msg}`); };
+
+    log(`Connecting → bucket: "${this.bucket}"`);
+
+    const timeoutMs = 15_000;
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`Timed out after ${timeoutMs / 1000}s — check your internet connection and region.`)),
+        timeoutMs
+      )
+    );
+
+    try {
+      const res = await Promise.race([
+        this.client.send(new GetBucketLocationCommand({ Bucket: this.bucket })),
+        timeout
+      ]);
+      log(`OK — bucket region confirmed: ${res.LocationConstraint ?? 'us-east-1'}`);
+    } catch (err) {
+      const friendly = S3Service.friendlyError(err, this.bucket);
+      logErr(friendly);
+      logErr(`Raw: ${err instanceof Error ? err.message : String(err)}`);
+      throw new Error(friendly);
+    }
+  }
+
+  private static friendlyError(err: unknown, bucket: string): string {
+    const name: string = (err as any)?.name ?? '';
+    const msg: string  = err instanceof Error ? err.message : String(err);
+
+    if (name === 'InvalidAccessKeyId' || msg.includes('InvalidAccessKeyId'))
+      return 'Invalid Access Key ID. Double-check AWS_ACCESS_KEY_ID in your .env file.';
+    if (name === 'SignatureDoesNotMatch' || msg.includes('SignatureDoesNotMatch'))
+      return 'Wrong secret key. Double-check AWS_SECRET_ACCESS_KEY in your .env file.';
+    if (name === 'InvalidClientTokenId' || msg.includes('InvalidClientTokenId'))
+      return 'Credentials are malformed or belong to an STS temporary token that has expired.';
+    if (name === 'NoSuchBucket' || msg.includes('NoSuchBucket'))
+      return `Bucket "${bucket}" does not exist. Verify the bucket name and that it was created in this region.`;
+    if (name === 'AccessDenied' || msg.includes('AccessDenied'))
+      return `Access denied to "${bucket}". Your IAM user lacks s3:GetBucketLocation permission, or the bucket policy blocks access.`;
+    if (name === 'PermanentRedirect' || msg.includes('PermanentRedirect'))
+      return `Wrong region. Bucket "${bucket}" is not in the configured region. Check AWS_REGION in your .env file.`;
+    if (name === 'AuthorizationHeaderMalformed' || msg.includes('AuthorizationHeaderMalformed'))
+      return `Region mismatch. The request was sent to the wrong regional endpoint. Verify AWS_REGION in your .env file.`;
+    if (name === 'CredentialsProviderError' || msg.includes('Could not load credentials') || msg.includes('credential'))
+      return 'No AWS credentials found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in your .env file.';
+    if (msg.includes('ENOTFOUND') || msg.includes('ETIMEDOUT') || msg.includes('ECONNREFUSED') || msg.includes('getaddrinfo'))
+      return 'Cannot reach AWS S3. Check your internet connection.';
+    return msg;
+  }
+
+  /**
+   * Enable versioning on the bucket. Idempotent — safe to call repeatedly.
+   * Required for the version history / restore feature to do anything useful.
+   */
+  async ensureVersioningEnabled(): Promise<void> {
+    await this.client.send(new PutBucketVersioningCommand({
+      Bucket: this.bucket,
+      VersioningConfiguration: { Status: 'Enabled' }
+    }));
+  }
+
+  async createFolder(prefix: string): Promise<void> {
+    const key = prefix.endsWith('/') ? prefix : prefix + '/';
+    await this.client.send(new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      Body: ''
+    }));
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "name": "s3drive",
+  "version": "0.1.0",
+  "description": "A Drive-like desktop client for Amazon S3 with per-upload storage class control",
+  "main": "dist/main/index.js",
+  "author": "Debajyoti",
+  "license": "MIT",
+  "scripts": {
+    "dev": "npm run build:main && concurrently -k \"npm:dev:renderer\" \"npm:dev:watch\" \"npm:dev:electron\"",
+    "dev:renderer": "vite",
+    "dev:watch": "tsc -p tsconfig.main.json --watch --preserveWatchOutput",
+    "dev:electron": "wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .",
+    "build": "npm run build:renderer && npm run build:main",
+    "build:renderer": "vite build",
+    "build:main": "tsc -p tsconfig.main.json",
+    "start": "electron .",
+    "package": "npm run build && electron-builder",
+    "lint": "eslint src --ext .ts,.tsx"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.658.0",
+    "@aws-sdk/credential-providers": "^3.658.0",
+    "@aws-sdk/lib-storage": "^3.658.0",
+    "@aws-sdk/s3-request-presigner": "^3.658.0",
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^17.4.2",
+    "mime-types": "^2.1.35"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^20.16.5",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.0.1",
+    "cross-env": "^7.0.3",
+    "electron": "^32.1.0",
+    "electron-builder": "^25.0.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.6",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.debajyoti.s3drive",
+    "productName": "Debajyoti Drive",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.utilities"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}
