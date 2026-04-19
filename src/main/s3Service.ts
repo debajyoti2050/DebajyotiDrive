@@ -4,6 +4,7 @@ import {
   ListObjectVersionsCommand,
   HeadObjectCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   GetObjectCommand,
   PutObjectCommand,
   RestoreObjectCommand,
@@ -11,6 +12,7 @@ import {
   PutBucketVersioningCommand,
   GetBucketLocationCommand
 } from '@aws-sdk/client-s3';
+import archiver from 'archiver';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createReadStream, createWriteStream, statSync } from 'node:fs';
@@ -23,6 +25,7 @@ import { join } from 'node:path';
 import {
   AppConfig,
   BucketAnalytics,
+  FolderInfo,
   RestoreRequest,
   S3Object,
   S3ObjectVersion,
@@ -63,8 +66,8 @@ export class S3Service {
    * List objects under a prefix. We treat "/" as the folder separator
    * since S3 has no real folders — this is just a UX convention.
    */
-  async list(prefix = ''): Promise<{ folders: string[]; files: S3Object[] }> {
-    const folders: string[] = [];
+  async list(prefix = ''): Promise<{ folders: FolderInfo[]; files: S3Object[] }> {
+    const folderPrefixes: string[] = [];
     const files: S3Object[] = [];
     let continuationToken: string | undefined;
 
@@ -77,10 +80,10 @@ export class S3Service {
       }));
 
       for (const cp of res.CommonPrefixes ?? []) {
-        if (cp.Prefix) folders.push(cp.Prefix);
+        if (cp.Prefix) folderPrefixes.push(cp.Prefix);
       }
       for (const obj of res.Contents ?? []) {
-        if (!obj.Key || obj.Key === prefix) continue; // skip the prefix marker itself
+        if (!obj.Key || obj.Key === prefix) continue;
         files.push({
           key: obj.Key,
           size: obj.Size ?? 0,
@@ -91,6 +94,30 @@ export class S3Service {
       }
       continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined;
     } while (continuationToken);
+
+    // Fetch folder stats in parallel (capped at 500 objects each)
+    const folders = await Promise.all(folderPrefixes.map(async (fp): Promise<FolderInfo> => {
+      try {
+        const r = await this.client.send(new ListObjectsV2Command({
+          Bucket: this.bucket, Prefix: fp, MaxKeys: 500
+        }));
+        let size = 0, lastModified = '';
+        for (const obj of r.Contents ?? []) {
+          size += obj.Size ?? 0;
+          const m = (obj.LastModified ?? new Date()).toISOString();
+          if (m > lastModified) lastModified = m;
+        }
+        return {
+          prefix: fp,
+          size,
+          count: r.Contents?.length ?? 0,
+          lastModified: lastModified || new Date(0).toISOString(),
+          capped: !!r.IsTruncated,
+        };
+      } catch {
+        return { prefix: fp, size: 0, count: 0, lastModified: new Date(0).toISOString(), capped: false };
+      }
+    }));
 
     return { folders, files };
   }
@@ -185,12 +212,138 @@ export class S3Service {
     }
   }
 
+  async uploadStream(
+    key: string,
+    body: Readable,
+    size: number,
+    storageClass: StorageClass,
+    onProgress: (p: UploadProgress) => void
+  ): Promise<void> {
+    const uploader = new Upload({
+      client: this.client,
+      partSize: PART_SIZE,
+      queueSize: size >= MULTIPART_THRESHOLD ? 4 : 1,
+      params: { Bucket: this.bucket, Key: key, Body: body, StorageClass: storageClass }
+    });
+
+    this.activeUploads.set(key, uploader);
+
+    uploader.on('httpUploadProgress', (p) => {
+      onProgress({ key, loaded: p.loaded ?? 0, total: p.total ?? size, done: false });
+    });
+
+    try {
+      await uploader.done();
+      this.activeUploads.delete(key);
+      onProgress({ key, loaded: size, total: size, done: true });
+    } catch (err) {
+      this.activeUploads.delete(key);
+      const cancelled = (err as any)?.name === 'AbortError'
+        || (err as any)?.name === 'RequestAbortedError'
+        || String(err).toLowerCase().includes('aborted');
+      onProgress({ key, loaded: 0, total: size, done: true, error: cancelled ? 'Cancelled' : err instanceof Error ? err.message : String(err) });
+      if (!cancelled) throw err;
+    }
+  }
+
   cancelUpload(key: string): void {
     const uploader = this.activeUploads.get(key);
     if (uploader) {
       uploader.abort();
       this.activeUploads.delete(key);
     }
+  }
+
+  /** Recursively delete all objects under a prefix. Returns deleted count. */
+  async deleteFolder(prefix: string): Promise<number> {
+    const keys: string[] = [];
+    let token: string | undefined;
+    do {
+      const res = await this.client.send(new ListObjectsV2Command({
+        Bucket: this.bucket, Prefix: prefix, ContinuationToken: token
+      }));
+      for (const obj of res.Contents ?? []) {
+        if (obj.Key) keys.push(obj.Key);
+      }
+      token = res.IsTruncated ? res.NextContinuationToken : undefined;
+    } while (token);
+
+    for (let i = 0; i < keys.length; i += 1000) {
+      const batch = keys.slice(i, i + 1000);
+      await this.client.send(new DeleteObjectsCommand({
+        Bucket: this.bucket,
+        Delete: { Objects: batch.map(k => ({ Key: k })), Quiet: true }
+      }));
+    }
+    return keys.length;
+  }
+
+  /** Stream all objects under the given prefixes into a single zip file. */
+  async downloadFoldersAsZip(
+    prefixes: string[],
+    destPath: string,
+    onProgress: (p: UploadProgress) => void,
+    jobKey: string
+  ): Promise<void> {
+    // List all objects across all prefixes
+    const objects: { key: string; size: number }[] = [];
+    for (const prefix of prefixes) {
+      let token: string | undefined;
+      do {
+        const res = await this.client.send(new ListObjectsV2Command({
+          Bucket: this.bucket, Prefix: prefix, ContinuationToken: token
+        }));
+        for (const obj of res.Contents ?? []) {
+          if (obj.Key && !obj.Key.endsWith('/'))
+            objects.push({ key: obj.Key, size: obj.Size ?? 0 });
+        }
+        token = res.IsTruncated ? res.NextContinuationToken : undefined;
+      } while (token);
+    }
+
+    const totalBytes = objects.reduce((s, o) => s + o.size, 0);
+    let loadedBytes = 0;
+
+    const arc = archiver('zip', { zlib: { level: 5 } });
+    const output = createWriteStream(destPath);
+    const closed = new Promise<void>((res, rej) => {
+      output.on('close', res);
+      output.on('error', rej);
+      arc.on('error', rej);
+    });
+    arc.pipe(output);
+
+    // Common prefix to strip so zip paths are relative
+    const commonPrefix = prefixes.length === 1 ? prefixes[0] : '';
+
+    for (const obj of objects) {
+      const getRes = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: obj.key }));
+      if (!getRes.Body) continue;
+
+      const zipPath = commonPrefix ? obj.key.slice(commonPrefix.length) : obj.key;
+      const body = getRes.Body as Readable;
+
+      // Count bytes as they stream through before handing to archiver
+      const tracker = new Transform({
+        transform(chunk: Buffer, _enc, cb) {
+          loadedBytes += chunk.length;
+          onProgress({ key: jobKey, loaded: loadedBytes, total: totalBytes, done: false });
+          cb(null, chunk);
+        }
+      });
+
+      // Wait for this file's stream to be fully piped before fetching next
+      await new Promise<void>((resolve, reject) => {
+        tracker.on('end', resolve);
+        tracker.on('error', reject);
+        arc.append(tracker, { name: zipPath });
+        body.pipe(tracker);
+      });
+    }
+
+    await arc.finalize();
+    await closed;
+    onProgress({ key: jobKey, loaded: totalBytes, total: totalBytes, done: true });
   }
 
   /**

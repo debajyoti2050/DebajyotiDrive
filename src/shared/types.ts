@@ -113,6 +113,14 @@ export const STORAGE_CLASSES: StorageClassInfo[] = [
   },
 ];
 
+export interface FolderInfo {
+  prefix: string;
+  size: number;       // sum of object sizes (up to 500 objects)
+  count: number;      // number of objects found (may be capped at 500)
+  lastModified: string; // ISO string of most recent object
+  capped: boolean;    // true if folder has >500 objects
+}
+
 export interface S3Object {
   key: string;
   size: number;
@@ -187,3 +195,19 @@ export interface BucketAnalytics {
 
 // Result wrapper so the renderer can render errors instead of throwing.
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
+
+export interface GDriveFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  modifiedTime?: string;
+  isFolder: boolean;
+  exportMimeType?: string;  // set for Google Workspace files
+  exportExtension?: string; // e.g. ".docx"
+}
+
+export interface GDriveConfig {
+  clientId: string;
+  clientSecret: string;
+}

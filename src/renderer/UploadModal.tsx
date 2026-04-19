@@ -12,16 +12,21 @@ interface Props {
 
 const MAX_BATCH = 10;
 
-function fmtPrice(n: number): string {
-  if (n === 0) return 'Free';
-  if (n < 0.001) return `$${n.toFixed(5)}`;
-  if (n < 0.01) return `$${n.toFixed(4)}`;
-  return `$${n.toFixed(3)}`;
+const TIER_COLORS: Record<number, string> = {
+  1: '#f472b6', 2: '#a78bfa', 3: '#60a5fa', 4: '#34d399', 5: '#6b7280',
+};
+const USD_TO_INR = 84;
+function fmtINR(usd: number) {
+  const inr = usd * USD_TO_INR;
+  if (inr === 0) return 'Free';
+  if (inr < 1) return `₹${inr.toFixed(2)}`;
+  return `₹${inr.toFixed(2)}`;
 }
 
 export const UploadModal: React.FC<Props> = ({ prefix, onClose, onUpload }) => {
   const [files, setFiles] = useState<PickedFile[]>([]);
   const [storageClass, setStorageClass] = useState<StorageClass>('STANDARD');
+  const [isDragHover, setIsDragHover] = useState(false);
 
   const pickFiles = async () => {
     const res = await window.s3drive.dialog.pickFiles();
@@ -33,9 +38,24 @@ export const UploadModal: React.FC<Props> = ({ prefix, onClose, onUpload }) => {
     });
   };
 
+  const pickFolder = async () => {
+    const res = await window.s3drive.dialog.pickFolder();
+    if (!res.ok || !res.value) return;
+    const { folderName, files: folderFiles } = res.value;
+    const picked = folderFiles.map(f => ({
+      localPath: f.localPath,
+      name: `${folderName}/${f.relativePath}`,
+    }));
+    setFiles(prev => {
+      const existing = new Set(prev.map(f => f.localPath));
+      return [...prev, ...picked.filter(p => !existing.has(p.localPath))];
+    });
+  };
+
   const selectedInfo = STORAGE_CLASSES.find(c => c.id === storageClass)!;
-  const queueBatches = Math.ceil(files.length / MAX_BATCH);
+  const tierColor = TIER_COLORS[selectedInfo.costTier];
   const overBatch = files.length > MAX_BATCH;
+  const queueBatches = Math.ceil(files.length / MAX_BATCH);
 
   return (
     <motion.div
@@ -43,141 +63,323 @@ export const UploadModal: React.FC<Props> = ({ prefix, onClose, onUpload }) => {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      transition={{ duration: 0.18 }}
       onClick={onClose}
     >
       <motion.div
-        className="modal"
-        initial={{ scale: 0.96, opacity: 0, y: 12 }}
+        className="upload-modal"
+        initial={{ scale: 0.9, opacity: 0, y: 24 }}
         animate={{ scale: 1, opacity: 1, y: 0 }}
-        exit={{ scale: 0.96, opacity: 0, y: 8 }}
-        transition={{ type: 'spring', damping: 28, stiffness: 320 }}
+        exit={{ scale: 0.93, opacity: 0, y: 10 }}
+        transition={{ type: 'spring', damping: 24, stiffness: 260 }}
         onClick={e => e.stopPropagation()}
-        style={{ width: 660 }}
+        style={{ '--tc': tierColor } as React.CSSProperties}
       >
-        <div className="modal-header">
-          <div className="modal-title">
-            Upload to <code style={{ color: 'var(--accent)' }}>/{prefix || '(root)'}</code>
+        {/* Circuit grid background */}
+        <div className="upload-grid-bg" />
+
+        {/* Animated corner accents */}
+        {(['tl','tr','bl','br'] as const).map(corner => (
+          <motion.div
+            key={corner}
+            className={`upload-corner upload-corner-${corner}`}
+            animate={{ opacity: [0.4, 1, 0.4] }}
+            transition={{ duration: 2.5, repeat: Infinity, ease: 'easeInOut', delay: ['tl','br'].includes(corner) ? 0 : 1.25 }}
+            style={{ borderColor: `${tierColor}80` }}
+          />
+        ))}
+
+        {/* Header */}
+        <div className="upload-modal-header">
+          <div className="upload-modal-header-left">
+            <motion.div
+              className="upload-hex-icon"
+              animate={{ rotate: [0, 360] }}
+              transition={{ duration: 12, repeat: Infinity, ease: 'linear' }}
+              style={{ color: tierColor }}
+            >
+              <svg width="34" height="34" viewBox="0 0 34 34" fill="none">
+                <polygon points="17,2 30,9.5 30,24.5 17,32 4,24.5 4,9.5"
+                  stroke="currentColor" strokeWidth="1.5" fill="none" />
+                <motion.polyline
+                  points="12,19 17,14 22,19"
+                  stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"
+                  animate={{ opacity: [0.5, 1, 0.5] }}
+                  transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
+                />
+                <line x1="17" y1="14" x2="17" y2="23" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </motion.div>
+            <div>
+              <div className="upload-modal-title">UPLOAD INTERFACE</div>
+              <div className="upload-modal-subtitle">
+                <motion.span animate={{ opacity: [0.5, 1, 0.5] }} transition={{ duration: 2, repeat: Infinity }}>▶</motion.span>
+                {' '}TARGET: /{prefix || 'root'}
+              </div>
+            </div>
           </div>
-          <button className="modal-close" onClick={onClose}>esc</button>
+          <motion.button
+            className="upload-close-btn"
+            onClick={onClose}
+            whileHover={{ rotate: 90, scale: 1.15, borderColor: 'var(--danger)', color: 'var(--danger)' }}
+            whileTap={{ scale: 0.85 }}
+            transition={{ type: 'spring', stiffness: 400, damping: 12 }}
+          >✕</motion.button>
         </div>
 
-        <div className="modal-body">
-          {/* File queue */}
-          <div className="field">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <label className="field-label" style={{ marginBottom: 0 }}>Files</label>
-              {files.length > 0 && (
-                <span className="upload-queue-badge">
-                  {files.length} file{files.length !== 1 ? 's' : ''}
-                  {overBatch && ` · ${queueBatches} batches of ${MAX_BATCH}`}
-                </span>
-              )}
-            </div>
-            <button className="btn" onClick={pickFiles}>+ Add files</button>
+        <div className="upload-modal-body">
+          {/* ── Left: drop zone + file list ── */}
+          <div className="upload-modal-left">
+            {/* Drop zone */}
+            <motion.div
+              className={`upload-dropzone ${isDragHover ? 'dz-hover' : ''} ${files.length > 0 ? 'dz-has' : ''}`}
+              onClick={pickFiles}
+              onDragOver={e => { e.preventDefault(); setIsDragHover(true); }}
+              onDragLeave={() => setIsDragHover(false)}
+              onDrop={e => { e.preventDefault(); setIsDragHover(false); pickFiles(); }}
+              whileHover={{ borderColor: tierColor }}
+              animate={isDragHover ? { scale: 1.015 } : { scale: 1 }}
+              style={{ borderColor: files.length > 0 ? `${tierColor}60` : undefined }}
+            >
+              {/* Pulsing rings */}
+              {files.length === 0 && [0, 1, 2].map(i => (
+                <motion.div
+                  key={i}
+                  className="dz-ring"
+                  animate={{ scale: [1, 1.8 + i * 0.4, 1], opacity: [0.5, 0, 0.5] }}
+                  transition={{ duration: 2.8, delay: i * 0.85, repeat: Infinity, ease: 'easeOut' }}
+                  style={{ borderColor: `${tierColor}60` }}
+                />
+              ))}
+
+              <div className="dz-content">
+                <AnimatePresence mode="wait">
+                  {files.length > 0 ? (
+                    <motion.div
+                      key="count"
+                      className="dz-count"
+                      initial={{ scale: 0.6, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      exit={{ scale: 0.6, opacity: 0 }}
+                      style={{ color: tierColor }}
+                    >
+                      <motion.span
+                        animate={{ textShadow: [`0 0 8px ${tierColor}40`, `0 0 20px ${tierColor}80`, `0 0 8px ${tierColor}40`] }}
+                        transition={{ duration: 2, repeat: Infinity }}
+                      >{files.length}</motion.span>
+                      <span className="dz-count-label">FILE{files.length !== 1 ? 'S' : ''} QUEUED</span>
+                    </motion.div>
+                  ) : (
+                    <motion.div
+                      key="prompt"
+                      className="dz-prompt"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                    >
+                      <motion.svg
+                        width="28" height="28" viewBox="0 0 24 24" fill="none"
+                        stroke={tierColor} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
+                        animate={{ y: [0, -5, 0] }}
+                        transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
+                      >
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                      </motion.svg>
+                      <span className="dz-label">CLICK TO SELECT FILES</span>
+                      <span className="dz-hint">or drag &amp; drop</span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </motion.div>
+
+            {/* Folder upload button */}
+            <motion.button
+              className="upload-folder-btn"
+              onClick={pickFolder}
+              style={{ color: 'var(--text-faint)', borderColor: `${tierColor}40` }}
+              whileHover={{ borderColor: tierColor, color: tierColor, scale: 1.02 }}
+              whileTap={{ scale: 0.97 }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                <line x1="12" y1="11" x2="12" y2="17"/><polyline points="9 14 12 11 15 14"/>
+              </svg>
+              UPLOAD FOLDER
+            </motion.button>
+
+            {/* File list */}
             <AnimatePresence>
               {files.length > 0 && (
                 <motion.div
-                  className="upload-list"
-                  style={{ marginTop: 10, maxHeight: 180, overflowY: 'auto' }}
+                  className="upload-file-list"
                   initial={{ opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: 'auto' }}
                   exit={{ opacity: 0, height: 0 }}
                 >
-                  {files.map((f, i) => (
-                    <motion.div
-                      key={f.localPath}
-                      className="upload-item"
-                      initial={{ opacity: 0, x: -8 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: 8 }}
-                      transition={{ delay: Math.min(i * 0.03, 0.2) }}
-                    >
-                      <div className="upload-item-name">
-                        <span style={{ fontSize: 11, color: 'var(--text-faint)', marginRight: 4, minWidth: 22, textAlign: 'right', display: 'inline-block' }}>
-                          {i + 1}.
-                        </span>
-                        <strong style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</strong>
+                  {/* Add more button */}
+                  <motion.button
+                    className="upload-add-more"
+                    onClick={pickFiles}
+                    whileHover={{ borderColor: tierColor, color: tierColor }}
+                    style={{ color: 'var(--text-faint)' }}
+                  >+ ADD MORE</motion.button>
+
+                  <div className="upload-file-rows">
+                    {files.map((f, i) => (
+                      <motion.div
+                        key={f.localPath}
+                        className="upload-file-item"
+                        initial={{ opacity: 0, x: -14 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, x: 14, height: 0 }}
+                        transition={{ delay: Math.min(i * 0.035, 0.3) }}
+                      >
+                        {/* Scan line */}
+                        <motion.div
+                          className="file-scan-line"
+                          animate={{ x: ['-100%', '200%'] }}
+                          transition={{ duration: 1.8, delay: i * 0.12, repeat: Infinity, repeatDelay: 4 + i * 0.4, ease: 'easeInOut' }}
+                        />
+                        <span className="file-num" style={{ color: tierColor }}>{String(i + 1).padStart(2, '0')}</span>
                         {i >= MAX_BATCH && (
-                          <span style={{ fontSize: 10, color: 'var(--text-faint)', marginRight: 6 }}>queue {Math.floor(i / MAX_BATCH) + 1}</span>
+                          <span className="file-batch-tag">B{Math.floor(i / MAX_BATCH) + 1}</span>
                         )}
-                        <button
-                          className="icon-btn danger"
+                        <span className="file-name-label">{f.name}</span>
+                        <motion.button
+                          className="file-remove-btn"
                           onClick={() => setFiles(prev => prev.filter((_, j) => j !== i))}
-                          style={{ padding: '0 6px', flexShrink: 0 }}
-                        >remove</button>
-                      </div>
-                    </motion.div>
-                  ))}
+                          whileHover={{ scale: 1.2, color: 'var(--danger)' }}
+                          whileTap={{ scale: 0.8 }}
+                        >×</motion.button>
+                      </motion.div>
+                    ))}
+                  </div>
                 </motion.div>
               )}
             </AnimatePresence>
-            {overBatch && (
-              <div className="field-help" style={{ marginTop: 6, color: 'var(--info)' }}>
-                ℹ {files.length} files will upload {MAX_BATCH} at a time in {queueBatches} batches.
-              </div>
-            )}
           </div>
 
-          {/* Storage class with pricing */}
-          <div className="field">
-            <label className="field-label">Storage class</label>
-            <div className="field-help" style={{ marginTop: 0, marginBottom: 8 }}>
-              Prices shown are us-east-1 reference rates. Actual cost depends on your bucket region.
-            </div>
-            <div className="tier-grid">
-              {STORAGE_CLASSES.map(c => (
-                <div
-                  key={c.id}
-                  className={`tier-option ${storageClass === c.id ? 'selected' : ''}`}
-                  onClick={() => setStorageClass(c.id)}
-                >
-                  <div className="tier-radio" />
-                  <div style={{ minWidth: 0 }}>
-                    <div className="tier-info-label">
-                      <span className="tier-chip" data-tier={c.costTier}>{c.label}</span>
-                    </div>
-                    <div className="tier-info-blurb">{c.blurb}</div>
-                    <div className="tier-info-meta">
-                      Retrieve: {c.retrievalTime}{c.minDays > 0 && ` · Min ${c.minDays} days`}
-                    </div>
-                    {!c.instantRetrieve && (
-                      <div className="tier-warn">⚠ Requires restore before download</div>
+          {/* ── Right: storage class selector ── */}
+          <div className="upload-modal-right">
+            <div className="upload-section-label">STORAGE CLASS</div>
+            <div className="upload-tier-list">
+              {STORAGE_CLASSES.map((c, i) => {
+                const tc = TIER_COLORS[c.costTier];
+                const selected = storageClass === c.id;
+                return (
+                  <motion.div
+                    key={c.id}
+                    className={`upload-tier-card${selected ? ' utc-selected' : ''}`}
+                    onClick={() => setStorageClass(c.id)}
+                    initial={{ opacity: 0, x: 10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: i * 0.04 }}
+                    whileHover={{ x: 2, borderColor: tc }}
+                    style={selected ? {
+                      borderColor: tc,
+                      boxShadow: `0 0 14px ${tc}28, inset 0 0 24px ${tc}0a`,
+                    } : {}}
+                  >
+                    {selected && (
+                      <motion.div
+                        layoutId="tier-bg"
+                        className="utc-bg"
+                        style={{ background: `linear-gradient(135deg, ${tc}18, transparent 70%)` }}
+                      />
                     )}
-                  </div>
-                  {/* Pricing column */}
-                  <div className="tier-pricing">
-                    <div className="tier-price-main">{fmtPrice(c.storagePerGBMonth)}<span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-dim)' }}>/GB·mo</span></div>
-                    <div className="tier-price-retrieval">
-                      {c.retrievalPerGB > 0 ? `${fmtPrice(c.retrievalPerGB)}/GB retrieval` : 'Free retrieval'}
+                    <div className="utc-dot" style={{ background: tc }} />
+                    <div className="utc-info">
+                      <div className="utc-name">{c.label}</div>
+                      <div className="utc-price" style={{ color: tc }}>
+                        {fmtINR(c.storagePerGBMonth)}<span>/GB·mo</span>
+                      </div>
                     </div>
-                    <div className="tier-price-sub">{fmtPrice(c.putPer1000)}/1k PUTs</div>
-                  </div>
-                </div>
-              ))}
+                    {!c.instantRetrieve && <span className="utc-archive">ARCHIVE</span>}
+                    {selected && (
+                      <motion.span
+                        className="utc-check"
+                        initial={{ scale: 0, rotate: -45 }}
+                        animate={{ scale: 1, rotate: 0 }}
+                        style={{ color: tc }}
+                      >✓</motion.span>
+                    )}
+                  </motion.div>
+                );
+              })}
             </div>
-          </div>
 
-          {(storageClass === 'STANDARD_IA' || storageClass === 'ONEZONE_IA') && files.length > 0 && (
-            <div className="field-help" style={{ color: 'var(--accent)' }}>
-              ⚠ IA tiers bill a minimum of {selectedInfo.minDays} days per object.
-            </div>
-          )}
+            {/* Selected tier detail */}
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={storageClass}
+                className="upload-tier-detail"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                style={{ borderColor: `${tierColor}50` }}
+              >
+                <div className="utd-blurb">{selectedInfo.blurb}</div>
+                <div className="utd-meta">
+                  <span>⚡ {selectedInfo.retrievalTime}</span>
+                  {selectedInfo.minDays > 0 && <span>· Min {selectedInfo.minDays}d</span>}
+                  {!selectedInfo.instantRetrieve && <span className="utd-warn">⚠ Restore required</span>}
+                </div>
+              </motion.div>
+            </AnimatePresence>
+          </div>
         </div>
 
-        <div className="modal-footer">
-          <button className="btn" onClick={onClose}>Cancel</button>
-          <button
-            className="btn primary"
+        {/* Footer */}
+        <div className="upload-modal-footer">
+          {overBatch ? (
+            <motion.span
+              className="upload-batch-label"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+            >
+              ⚡ {queueBatches} batches · {MAX_BATCH} concurrent
+            </motion.span>
+          ) : <span />}
+
+          <motion.button
+            className="upload-abort-btn"
+            onClick={onClose}
+            whileHover={{ scale: 1.03, borderColor: 'var(--danger)', color: 'var(--danger)' }}
+            whileTap={{ scale: 0.95 }}
+          >ABORT</motion.button>
+
+          <motion.button
+            className={`upload-transmit-btn${files.length === 0 ? ' utb-disabled' : ''}`}
             disabled={files.length === 0}
             onClick={() => onUpload(files, storageClass)}
+            whileHover={files.length > 0 ? { scale: 1.02 } : {}}
+            whileTap={files.length > 0 ? { scale: 0.97 } : {}}
+            animate={files.length > 0 ? {
+              boxShadow: [`0 0 10px ${tierColor}30`, `0 0 22px ${tierColor}60`, `0 0 10px ${tierColor}30`],
+            } : {}}
+            transition={{ boxShadow: { duration: 2, repeat: Infinity, ease: 'easeInOut' } }}
+            style={files.length > 0 ? {
+              background: `linear-gradient(135deg, ${tierColor}ee, ${tierColor}99)`,
+            } : {}}
           >
-            {files.length === 0
-              ? 'Upload'
-              : overBatch
-                ? `Queue ${files.length} files (${queueBatches} batches)`
-                : `Upload ${files.length} file${files.length > 1 ? 's' : ''}`}
-          </button>
+            {files.length > 0 && (
+              <span className="utb-dots">
+                {[0, 1, 2].map(i => (
+                  <motion.span key={i}
+                    animate={{ opacity: [0.2, 1, 0.2], scale: [0.7, 1.3, 0.7] }}
+                    transition={{ duration: 1, delay: i * 0.28, repeat: Infinity }}
+                  />
+                ))}
+              </span>
+            )}
+            <span>
+              {files.length === 0
+                ? 'SELECT FILES TO UPLOAD'
+                : `TRANSMIT ${files.length} FILE${files.length !== 1 ? 'S' : ''}`}
+            </span>
+          </motion.button>
         </div>
       </motion.div>
     </motion.div>

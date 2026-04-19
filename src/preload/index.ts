@@ -3,6 +3,9 @@ console.log('[Preload] starting — contextBridge available:', typeof contextBri
 import type {
   AppConfig,
   BucketAnalytics,
+  FolderInfo,
+  GDriveConfig,
+  GDriveFile,
   MultiConfig,
   RestoreRequest,
   Result,
@@ -28,7 +31,7 @@ const api = {
     }
   },
   s3: {
-    list: (prefix: string): Promise<Result<{ folders: string[]; files: S3Object[] }>> =>
+    list: (prefix: string): Promise<Result<{ folders: FolderInfo[]; files: S3Object[] }>> =>
       ipcRenderer.invoke('s3:list', prefix),
     search: (query: string): Promise<Result<S3Object[]>> =>
       ipcRenderer.invoke('s3:search', query),
@@ -62,6 +65,10 @@ const api = {
       ipcRenderer.invoke('s3:move', args),
     cancelUpload: (key: string): Promise<Result<true>> =>
       ipcRenderer.invoke('s3:cancelUpload', key),
+    deleteFolder: (prefix: string): Promise<Result<number>> =>
+      ipcRenderer.invoke('s3:deleteFolder', prefix),
+    downloadFoldersAsZip: (args: { prefixes: string[]; zipName: string; jobKey: string }): Promise<Result<string | null>> =>
+      ipcRenderer.invoke('s3:downloadFoldersAsZip', args),
     onUploadProgress: (cb: (p: UploadProgress) => void): (() => void) => {
       const listener = (_e: unknown, p: UploadProgress) => cb(p);
       ipcRenderer.on('s3:uploadProgress', listener);
@@ -74,11 +81,29 @@ const api = {
     }
   },
   dialog: {
-    pickFiles: (): Promise<Result<string[]>> => ipcRenderer.invoke('dialog:pickFiles')
+    pickFiles: (): Promise<Result<string[]>> => ipcRenderer.invoke('dialog:pickFiles'),
+    pickFolder: (): Promise<Result<{ folderName: string; files: { localPath: string; relativePath: string }[] } | null>> =>
+      ipcRenderer.invoke('dialog:pickFolder'),
   },
   shell: {
     openExternal: (url: string): Promise<Result<true>> =>
-      ipcRenderer.invoke('shell:openExternal', url)
+      ipcRenderer.invoke('shell:openExternal', url),
+    fetchAWSStatus: (): Promise<Result<string>> =>
+      ipcRenderer.invoke('shell:fetchAWSStatus'),
+  },
+  gdrive: {
+    init: (cfg: GDriveConfig): Promise<Result<true>> =>
+      ipcRenderer.invoke('gdrive:init', cfg),
+    status: (): Promise<Result<{ connected: boolean }>> =>
+      ipcRenderer.invoke('gdrive:status'),
+    auth: (): Promise<Result<true>> =>
+      ipcRenderer.invoke('gdrive:auth'),
+    list: (folderId?: string): Promise<Result<GDriveFile[]>> =>
+      ipcRenderer.invoke('gdrive:list', folderId),
+    transfer: (args: { files: GDriveFile[]; destPrefix: string; storageClass: StorageClass }): Promise<Result<true>> =>
+      ipcRenderer.invoke('gdrive:transfer', args),
+    disconnect: (): Promise<Result<true>> =>
+      ipcRenderer.invoke('gdrive:disconnect'),
   }
 };
 

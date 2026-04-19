@@ -39,3 +39,12 @@ export function canPreviewInline(key: string): boolean {
   const ext = key.split('.').pop()?.toLowerCase() ?? '';
   return PREVIEW_INLINE_TYPES.has(ext);
 }
+
+const USD_TO_INR = 84;
+export function formatINR(usd: number): string {
+  const inr = usd * USD_TO_INR;
+  if (inr === 0) return '₹0';
+  if (inr < 1) return `₹${(inr).toFixed(2)}`;
+  if (inr < 1000) return `₹${inr.toFixed(0)}`;
+  return `₹${(inr / 1000).toFixed(1)}k`;
+}
