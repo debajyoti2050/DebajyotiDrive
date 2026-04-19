@@ -1,10 +1,20 @@
 # S3Drive
+![S3Drive Logo](assets/logo.svg)
 
-A Drive-like desktop client for Amazon S3, built with Electron + React + TypeScript + AWS SDK v3. Per-upload storage class control, inline previews, pre-signed URL sharing, versioning with restore, and search.
+S3Drive — a Google Drive alternative that runs on Amazon S3. A pay-as-you-go cloud drive with Drive-like UX and S3 economics: choose storage class per upload, share with pre-signed links, and only pay for what you store and transfer.
 
-## Why this exists
+Short description: Fast desktop client for S3-backed storage, ideal for teams and power users who want a Drive-style interface with transparent, per-object pricing and archive support.
 
-Google Drive is great UX, lousy economics at scale. S3 is the opposite. S3Drive is a thin, honest client that puts S3's economics behind a Drive-flavored UI — and exposes storage classes as a first-class choice, not a hidden lifecycle policy.
+## Why choose S3Drive — a pay-as-you-go Drive alternative
+
+If you search for "Google Drive alternative" or "pay as you go cloud drive", S3Drive is built for that use case: Drive-style convenience with S3's cost model. It's an excellent fit when you want:
+
+- Drive-like browsing, preview, and sharing UX
+- Full control of storage class (Standard, IA, Glacier, Deep Archive)
+- Pay-as-you-go billing (storage + requests + egress) instead of fixed per-user plans
+- A desktop client that keeps credentials local and uses pre-signed URLs for sharing
+
+S3Drive bridges the gap between consumer cloud drives and cloud-native storage economics.
 
 ## Feature set
 
@@ -17,6 +27,14 @@ Google Drive is great UX, lousy economics at scale. S3 is the opposite. S3Drive 
 - **Archive restore** — initiate Glacier/Deep Archive restore with Bulk/Standard/Expedited tiers
 - **Search** across all objects in the bucket (client-side, capped at 500 matches for v1)
 - **Change storage class** of existing objects via copy-in-place
+
+## Benefits & SEO keywords
+
+- **Google Drive alternative**: Drive-like UI, file previews, and sharing.
+- **Pay-as-you-go cloud drive**: pay for storage, requests, and egress only.
+- **S3-backed**: durability and regional redundancy of AWS S3.
+- **Archive support**: choose Glacier tiers for long-term savings.
+- **Privacy-conscious**: credentials remain local to the desktop; no central user data collection.
 
 ## Prerequisites
 
@@ -102,6 +120,12 @@ The IAM user / role your credentials point to needs these permissions on the buc
 ```
 
 If you plan to let end-users have their own IAM users (e.g. in a team deployment), scope `Resource` to `arn:aws:s3:::YOUR-BUCKET/${aws:username}/*` so each user only sees their own prefix.
+
+## Architecture (visual)
+
+![architecture diagram](assets/diagram.svg)
+
+This diagram highlights the desktop client → S3 → billing flow and the pay-as-you-go model.
 
 ## CORS
 

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="120" viewBox="0 0 400 120">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1">
+      <stop offset="0" stop-color="#2196F3"/>
+      <stop offset="1" stop-color="#00BCD4"/>
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="transparent"/>
+  <g transform="translate(18,12)">
+    <path d="M48 12c-8.8 0-16 7.2-16 16 0 .9.1 1.8.3 2.6C24.8 32 16 40 16 50c0 11 9 20 20 20h112c13.3 0 24-10.7 24-24 0-11-8.9-20-19.8-23.6C153 36 144 28 136 28c-6 0-11 3-14 7-3-5-8-8-14-8-5.5 0-10.4 2.6-13.6 6.6C78.8 19 64.3 12 48 12z" fill="url(#g)"/>
+    <text x="170" y="60" font-family="Inter, Arial, sans-serif" font-size="36" fill="#0A2540">S3Drive</text>
+    <text x="170" y="87" font-family="Inter, Arial, sans-serif" font-size="14" fill="#31586F">Pay-as-you-go cloud drive</text>
+  </g>
+</svg>
