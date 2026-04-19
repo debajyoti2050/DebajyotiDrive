@@ -23,6 +23,7 @@
     "@aws-sdk/lib-storage": "^3.658.0",
     "@aws-sdk/s3-request-presigner": "^3.658.0",
     "archiver": "^7.0.1",
+    "archiver-utils": "^5.0.2",
     "better-sqlite3": "^11.3.0",
     "dotenv": "^17.4.2",
     "framer-motion": "^12.38.0",
@@ -43,9 +44,11 @@
     "cross-env": "^7.0.3",
     "electron": "^32.1.0",
     "electron-builder": "^25.0.5",
+    "png-to-ico": "^3.0.1",
     "postcss": "^8.5.10",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "sharp": "^0.34.5",
     "tailwindcss": "^4.2.2",
     "typescript": "^5.6.2",
     "vite": "^5.4.6",
@@ -66,7 +69,8 @@
       "category": "public.app-category.utilities"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "assets/icon.ico"
     },
     "linux": {
       "target": "AppImage"
