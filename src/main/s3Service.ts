@@ -113,7 +113,7 @@ export class S3Service {
       }));
 
       for (const obj of res.Contents ?? []) {
-        if (!obj.Key) continue;
+        if (!obj.Key || obj.Key.endsWith('/')) continue;
         if (obj.Key.toLowerCase().includes(lower)) {
           matches.push({
             key: obj.Key,
@@ -380,7 +380,7 @@ export class S3Service {
       }));
 
       for (const obj of res.Contents ?? []) {
-        if (!obj.Key) continue;
+        if (!obj.Key || obj.Key.endsWith('/')) continue; // skip folder marker objects
         const sc = obj.StorageClass ?? 'STANDARD';
         const size = obj.Size ?? 0;
         const entry = tierMap.get(sc) ?? { count: 0, bytes: 0 };

@@ -13,6 +13,7 @@ export interface UploadJob {
   startTime: number;
   speed: number; // bytes/sec
   type?: 'upload' | 'download';
+  queued?: boolean;  // waiting in queue, not yet started
 }
 
 interface Props {
@@ -74,10 +75,10 @@ export const UploadPanel: React.FC<Props> = ({ jobs, onDismiss, onCancel }) => {
             const canCancel = !j.done && isUpload && onCancel;
 
             return (
-              <div key={j.id} className="upload-panel-row">
+              <div key={j.id} className={`upload-panel-row${j.queued ? ' queued' : ''}`}>
                 <div className="upload-panel-row-name">
-                  <span className="upload-panel-icon">
-                    {j.error ? '✗' : j.done ? '✓' : isUpload ? '↑' : '↓'}
+                  <span className={`upload-panel-icon${j.queued ? ' queued' : ''}`}>
+                    {j.error ? '✗' : j.done ? '✓' : j.queued ? '⏸' : isUpload ? '↑' : '↓'}
                   </span>
                   <span className="upload-panel-filename" title={j.name}>{j.name}</span>
                   <span className="upload-panel-meta">
@@ -85,9 +86,11 @@ export const UploadPanel: React.FC<Props> = ({ jobs, onDismiss, onCancel }) => {
                       ? <span style={{ color: j.error === 'Cancelled' ? 'var(--text-muted)' : 'var(--danger)' }}>{j.error}</span>
                       : j.done
                         ? <span style={{ color: 'var(--success)' }}>Done · {formatBytes(j.total)}</span>
-                        : j.speed > 0
-                          ? `${formatBytes(j.speed)}/s · ${pct}%${eta ? ` · ${eta} left` : ''}`
-                          : j.total > 0 ? `${pct}%` : 'Waiting…'}
+                        : j.queued
+                          ? <span style={{ color: 'var(--text-faint)' }}>Queued</span>
+                          : j.speed > 0
+                            ? `${formatBytes(j.speed)}/s · ${pct}%${eta ? ` · ${eta} left` : ''}`
+                            : j.total > 0 ? `${pct}%` : 'Starting…'}
                   </span>
                   {canCancel && (
                     <button
@@ -97,12 +100,14 @@ export const UploadPanel: React.FC<Props> = ({ jobs, onDismiss, onCancel }) => {
                     >×</button>
                   )}
                 </div>
-                <div className="upload-bar" style={{ marginTop: 4 }}>
-                  <div
-                    className={`upload-bar-fill ${j.error ? 'error' : j.done ? 'done' : ''}`}
-                    style={{ width: `${j.error ? 100 : pct}%` }}
-                  />
-                </div>
+                {!j.queued && (
+                  <div className="upload-bar" style={{ marginTop: 4 }}>
+                    <div
+                      className={`upload-bar-fill ${j.error ? 'error' : j.done ? 'done' : ''}`}
+                      style={{ width: `${j.error ? 100 : pct}%` }}
+                    />
+                  </div>
+                )}
               </div>
             );
           })}

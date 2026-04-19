@@ -1,6 +1,23 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import type { AppConfig, S3Object, StorageClass, UploadProgress } from '@shared/types';
 import { STORAGE_CLASSES } from '@shared/types';
+import { Logo } from './Logo';
+import { AuroraBackground } from './AuroraBackground';
+
+// ── Animation variants ─────────────────────────────────────────────────────
+const rowVariants = {
+  hidden: { opacity: 0, x: -14 },
+  visible: (i: number) => ({
+    opacity: 1, x: 0,
+    transition: { delay: Math.min(i, 25) * 0.032, duration: 0.22, ease: [0.25, 0.46, 0.45, 0.94] as const }
+  }),
+};
+const sidebarBtnVariants = {
+  rest: { x: 0 },
+  hover: { x: 4, transition: { type: 'spring' as const, damping: 18, stiffness: 320 } },
+  tap: { scale: 0.96, x: 0 },
+};
 import { basename, canPreviewInline, formatBytes, formatDate, tierInfo } from './utils';
 import { SettingsModal } from './SettingsModal';
 import { UploadModal } from './UploadModal';
@@ -53,6 +70,9 @@ export const App: React.FC = () => {
   const [previewKey, setPreviewKey] = useState<string | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<{ key: string; storageClass: string } | null>(null);
 
+  // Bucket-wide storage total (loaded async in background)
+  const [bucketBytes, setBucketBytes] = useState<number | null>(null);
+
   // Transfer jobs (uploads + downloads)
   const [uploadJobs, setUploadJobs] = useState<UploadJob[]>([]);
   const uploadJobsRef = useRef<UploadJob[]>([]);
@@ -95,13 +115,22 @@ export const App: React.FC = () => {
     const off = window.s3drive.s3.onUploadProgress((p: UploadProgress) => {
       const now = Date.now();
       setUploadJobs(prev => prev.map(j => {
-        if (j.key !== p.key) return j;
-        const elapsed = Math.max((now - j.startTime) / 1000, 0.1);
+        if (j.key !== p.key || j.queued) return j;
+        const elapsed = Math.max((now - (j.startTime || now)) / 1000, 0.1);
         return { ...j, loaded: p.loaded, total: p.total || j.total, done: p.done, error: p.error, speed: p.loaded / elapsed };
       }));
     });
     return off;
   }, []);
+
+  // Fetch total bucket storage in the background whenever the active config changes
+  useEffect(() => {
+    if (!config) return;
+    setBucketBytes(null);
+    window.s3drive.s3.analytics().then(res => {
+      if (res.ok) setBucketBytes(res.value.totalBytes);
+    });
+  }, [config]);
 
   // Download progress
   useEffect(() => {
@@ -235,20 +264,30 @@ export const App: React.FC = () => {
     refresh();
   };
 
+  const MAX_CONCURRENT = 10;
+
   const handleUploadStart = (picked: { localPath: string; name: string }[], sc: StorageClass) => {
     setShowUpload(false);
+    const ts = Date.now();
     const jobs: UploadJob[] = picked.map((f, i) => ({
-      id: `${Date.now()}-${i}`,
-      name: f.name,
-      key: `${prefix}${f.name}`,
-      localPath: f.localPath,
+      id: `${ts}-${i}`, name: f.name,
+      key: `${prefix}${f.name}`, localPath: f.localPath,
       loaded: 0, total: 0, done: false,
-      startTime: Date.now(), speed: 0, type: 'upload' as const,
+      startTime: 0, speed: 0, type: 'upload' as const,
+      queued: i >= MAX_CONCURRENT,
     }));
     setUploadJobs(jobs);
+
     (async () => {
-      for (const job of jobs) {
-        await window.s3drive.s3.upload({ localPath: job.localPath, key: job.key, storageClass: sc });
+      for (let i = 0; i < jobs.length; i += MAX_CONCURRENT) {
+        const batch = jobs.slice(i, i + MAX_CONCURRENT);
+        const batchStart = Date.now();
+        setUploadJobs(prev => prev.map(j =>
+          batch.some(b => b.id === j.id) ? { ...j, queued: false, startTime: batchStart } : j
+        ));
+        await Promise.all(batch.map(job =>
+          window.s3drive.s3.upload({ localPath: job.localPath, key: job.key, storageClass: sc })
+        ));
       }
       refresh();
     })();
@@ -256,7 +295,11 @@ export const App: React.FC = () => {
 
   const cancelUpload = async (jobId: string) => {
     const job = uploadJobsRef.current.find(j => j.id === jobId);
-    if (!job) return;
+    if (!job || job.queued) {
+      // For queued (not yet started) jobs, just mark done/cancelled locally
+      setUploadJobs(prev => prev.map(j => j.id === jobId ? { ...j, done: true, error: 'Cancelled', queued: false } : j));
+      return;
+    }
     await window.s3drive.s3.cancelUpload(job.key);
   };
 
@@ -370,10 +413,34 @@ export const App: React.FC = () => {
     <div className="app">
       {/* Titlebar */}
       <div className="titlebar">
-        <div className="titlebar-brand">
-          Debajyoti<span className="accent">.</span>Drive
-        </div>
-        <div className="titlebar-actions">
+        <motion.div
+          className="titlebar-brand"
+          initial={{ opacity: 0, x: -20 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ duration: 0.5, ease: [0.25, 0.46, 0.45, 0.94] }}
+        >
+          <Logo size={28} />
+          <span className="titlebar-name">S3Drive</span>
+          <AnimatePresence>
+            {bucketBytes !== null && (
+              <motion.span
+                className="titlebar-storage-pill"
+                initial={{ opacity: 0, scale: 0.8, x: -8 }}
+                animate={{ opacity: 1, scale: 1, x: 0 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                transition={{ type: 'spring', damping: 20, stiffness: 280 }}
+              >
+                {formatBytes(bucketBytes)} used
+              </motion.span>
+            )}
+          </AnimatePresence>
+        </motion.div>
+        <motion.div
+          className="titlebar-actions"
+          initial={{ opacity: 0, x: 20 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ duration: 0.5, delay: 0.1, ease: [0.25, 0.46, 0.45, 0.94] }}
+        >
           {configs.length > 1 ? (
             <select className="bucket-switcher" value={activeIndex} onChange={e => switchBucket(Number(e.target.value))}>
               {configs.map((c, i) => <option key={i} value={i}>{c.bucket} · {c.region}</option>)}
@@ -384,30 +451,70 @@ export const App: React.FC = () => {
               {config.profile && ` · ${config.profile}`}
             </div>
           ) : null}
-          <button className="btn" onClick={() => setShowSettings(true)}>Settings</button>
-        </div>
+          <motion.button
+            className="btn"
+            onClick={() => setShowSettings(true)}
+            whileHover={{ scale: 1.04 }}
+            whileTap={{ scale: 0.95 }}
+            transition={{ type: 'spring', damping: 18, stiffness: 350 }}
+          >Settings</motion.button>
+        </motion.div>
       </div>
 
       {/* Main layout */}
       <div className="main">
-        <aside className="sidebar">
+        <motion.aside
+          className="sidebar"
+          initial={{ opacity: 0, x: -24 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ duration: 0.45, ease: [0.25, 0.46, 0.45, 0.94] }}
+        >
           <div className="sidebar-section">
-            <button className="sidebar-button primary" onClick={() => setShowUpload(true)} disabled={!config}>
+            {/* Upload button — continuous beacon pulse */}
+            <motion.button
+              className="sidebar-button primary"
+              onClick={() => setShowUpload(true)}
+              disabled={!config}
+              variants={sidebarBtnVariants}
+              initial="rest"
+              whileHover="hover"
+              whileTap="tap"
+              animate={config ? {
+                boxShadow: [
+                  '0 0 8px rgba(155,92,246,0.2), 0 2px 8px rgba(0,0,0,0.4)',
+                  '0 0 22px rgba(155,92,246,0.55), 0 4px 16px rgba(0,0,0,0.4)',
+                  '0 0 8px rgba(155,92,246,0.2), 0 2px 8px rgba(0,0,0,0.4)',
+                ]
+              } : {}}
+              transition={{ boxShadow: { duration: 2.4, repeat: Infinity, ease: 'easeInOut' }, default: { type: 'spring', damping: 18, stiffness: 320 } }}
+            >
               ↑ Upload files
-            </button>
-            <button className="sidebar-button" onClick={() => setShowNewFolder(true)} disabled={!config} style={{ marginTop: 6 }}>
+            </motion.button>
+            <motion.button
+              className="sidebar-button"
+              onClick={() => setShowNewFolder(true)}
+              disabled={!config}
+              style={{ marginTop: 6 }}
+              variants={sidebarBtnVariants}
+              initial="rest"
+              whileHover="hover"
+              whileTap="tap"
+              transition={{ type: 'spring', damping: 18, stiffness: 320 }}
+            >
               + New folder
-            </button>
+            </motion.button>
           </div>
 
           <div className="sidebar-section">
             <div className="sidebar-label">Search</div>
-            <input
+            <motion.input
               className="search-box"
               placeholder="Find in bucket…"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               disabled={!config}
+              whileFocus={{ scale: 1.01, boxShadow: '0 0 0 2px rgba(155,92,246,0.35)' }}
+              transition={{ duration: 0.15 }}
             />
           </div>
 
@@ -426,85 +533,126 @@ export const App: React.FC = () => {
 
           <div className="sidebar-section">
             <div className="sidebar-label">Bucket</div>
-            <button className="sidebar-button" onClick={() => setShowDashboard(true)} disabled={!config}>◈ Analytics</button>
-            <button className="sidebar-button" onClick={() => navigate('')} disabled={!config}>⌂ Root</button>
-            <button className="sidebar-button" onClick={enableVersioning} disabled={!config}>⟲ Enable versioning</button>
+            {[
+              { label: '◈ Analytics', action: () => setShowDashboard(true) },
+              { label: '⌂ Root', action: () => navigate('') },
+              { label: '⟲ Enable versioning', action: enableVersioning },
+            ].map(({ label, action }) => (
+              <motion.button
+                key={label}
+                className="sidebar-button"
+                onClick={action}
+                disabled={!config}
+                variants={sidebarBtnVariants}
+                initial="rest"
+                whileHover="hover"
+                whileTap="tap"
+                transition={{ type: 'spring', damping: 18, stiffness: 320 }}
+              >
+                {label}
+              </motion.button>
+            ))}
           </div>
 
           <div className="sidebar-section" style={{ marginTop: 'auto' }}>
             <div className="sidebar-label">Storage tiers</div>
             <div style={{ fontSize: 11, color: 'var(--text-faint)', lineHeight: 1.7 }}>
-              {STORAGE_CLASSES.map(sc => (
-                <div key={sc.id}>
+              {STORAGE_CLASSES.map((sc, i) => (
+                <motion.div
+                  key={sc.id}
+                  initial={{ opacity: 0, x: -8 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.4 + i * 0.06 }}
+                >
                   <span className="tier-chip" data-tier={sc.costTier} style={{ padding: '0 4px' }}>{sc.label}</span>
-                </div>
+                </motion.div>
               ))}
             </div>
           </div>
-        </aside>
+        </motion.aside>
 
         <main
           className={`content${dropZoneActive ? ' drop-zone-active' : ''}`}
+          style={{ position: 'relative' }}
           onDragOver={e => { e.preventDefault(); if (!draggedKey) setDropZoneActive(true); }}
           onDragLeave={e => {
-            // Only clear if leaving the main element itself
             if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropZoneActive(false);
           }}
           onDrop={handleContentDrop}
         >
+          {/* Continuous aurora background */}
+          <AuroraBackground />
+
           {/* Storage analytics bar */}
           {storageBar && (
-            <div className="storage-bar">
-              <div className="storage-bar-info">
+            <div className="storage-bar" style={{ position: 'relative', zIndex: 1 }}>
+              <motion.div
+                className="storage-bar-info"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.4 }}
+              >
                 <span>{storageBar.folderCount} folder{storageBar.folderCount !== 1 ? 's' : ''}</span>
                 <span className="storage-bar-sep">·</span>
                 <span>{storageBar.fileCount} file{storageBar.fileCount !== 1 ? 's' : ''}</span>
                 <span className="storage-bar-sep">·</span>
                 <span>{formatBytes(storageBar.total)} used</span>
-              </div>
+              </motion.div>
               <div className="storage-bar-track">
-                {storageBar.byTier.map(({ sc, pct }) => (
-                  <div key={sc.id} className="storage-bar-segment" data-tier={sc.costTier} style={{ width: `${pct}%` }} title={`${sc.label}: ${pct.toFixed(1)}%`} />
+                {storageBar.byTier.map(({ sc, pct }, i) => (
+                  <motion.div
+                    key={sc.id}
+                    className="storage-bar-segment"
+                    data-tier={sc.costTier}
+                    title={`${sc.label}: ${pct.toFixed(1)}%`}
+                    initial={{ width: 0, opacity: 0 }}
+                    animate={{ width: `${pct}%`, opacity: 1 }}
+                    transition={{ duration: 0.8, delay: 0.15 + i * 0.1, ease: [0.34, 1.56, 0.64, 1] }}
+                  />
                 ))}
               </div>
             </div>
           )}
 
           {/* Navigation bar — breadcrumb + back/forward */}
-          <div className="nav-bar">
+          <div className="nav-bar" style={{ position: 'relative', zIndex: 1 }}>
             <div className="nav-arrows">
-              <button
-                className="nav-arrow-btn"
-                onClick={goBack}
-                disabled={!canGoBack || showingSearch}
-                title="Go back"
-              >
-                &#8592;
-              </button>
-              <button
-                className="nav-arrow-btn"
-                onClick={goForward}
-                disabled={!canGoForward || showingSearch}
-                title="Go forward"
-              >
-                &#8594;
-              </button>
+              {[{ label: '←', action: goBack, disabled: !canGoBack || showingSearch, title: 'Go back' },
+                { label: '→', action: goForward, disabled: !canGoForward || showingSearch, title: 'Go forward' }
+              ].map(({ label, action, disabled, title }) => (
+                <motion.button
+                  key={label}
+                  className="nav-arrow-btn"
+                  onClick={action}
+                  disabled={disabled}
+                  title={title}
+                  whileHover={!disabled ? { scale: 1.15, boxShadow: '0 0 10px rgba(155,92,246,0.5)' } : {}}
+                  whileTap={!disabled ? { scale: 0.88 } : {}}
+                  transition={{ type: 'spring', damping: 16, stiffness: 380 }}
+                >
+                  {label}
+                </motion.button>
+              ))}
             </div>
 
             <div className="nav-path">
               {showingSearch ? (
-                <span className="nav-search-label">
+                <motion.span className="nav-search-label" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
                   Search: <span className="nav-search-query">"{searchQuery}"</span>
                   <span className="nav-search-count"> · {rows.length} result{rows.length !== 1 ? 's' : ''}</span>
-                </span>
+                </motion.span>
               ) : (
                 breadcrumbs.map((c, i) => (
                   <React.Fragment key={c.prefix}>
                     {i > 0 && <span className="nav-sep">›</span>}
-                    <span
+                    <motion.span
                       className={`nav-crumb${i === breadcrumbs.length - 1 ? ' current' : ''}`}
                       onClick={() => navigate(c.prefix)}
                       title={c.prefix || '/'}
+                      initial={{ opacity: 0, y: -6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: i * 0.05, duration: 0.2 }}
+                      whileHover={{ color: 'var(--accent)' }}
                     >
                       {i === 0 ? (
                         <span className="nav-crumb-icon">&#x229E;</span>
@@ -512,7 +660,7 @@ export const App: React.FC = () => {
                         <span className="nav-crumb-icon">&#x25B8;</span>
                       )}
                       {c.label}
-                    </span>
+                    </motion.span>
                   </React.Fragment>
                 ))
               )}
@@ -534,29 +682,75 @@ export const App: React.FC = () => {
           </div>
 
           {/* Drop hint overlay */}
-          {dropZoneActive && (
-            <div className="drop-overlay">
-              <div className="drop-overlay-label">Drop files to upload to /{prefix || '(root)'}</div>
-            </div>
-          )}
+          <AnimatePresence>
+            {dropZoneActive && (
+              <motion.div
+                className="drop-overlay"
+                initial={{ opacity: 0, scale: 0.97 }}
+                animate={{
+                  opacity: 1, scale: 1,
+                  borderColor: ['rgba(155,92,246,0.5)', 'rgba(155,92,246,1)', 'rgba(155,92,246,0.5)'],
+                }}
+                exit={{ opacity: 0, scale: 0.97 }}
+                transition={{ borderColor: { duration: 1, repeat: Infinity }, scale: { duration: 0.15 } }}
+              >
+                <motion.div
+                  className="drop-overlay-label"
+                  animate={{ y: [0, -4, 0] }}
+                  transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
+                >
+                  ↑ Drop files to upload to /{prefix || '(root)'}
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           {!config && configLoaded ? (
-            <div className="empty">
-              <div className="empty-icon">D</div>
-              <div className="empty-title">Not connected</div>
-              <div className="empty-blurb">Configure your bucket and region to get started.</div>
-              <button className="btn primary" style={{ marginTop: 20 }} onClick={() => setShowSettings(true)}>
+            <div className="empty" style={{ position: 'relative', zIndex: 1 }}>
+              <motion.div
+                className="empty-icon"
+                animate={{ rotate: [0, 8, -8, 0], scale: [1, 1.1, 1] }}
+                transition={{ duration: 4, repeat: Infinity, ease: 'easeInOut' }}
+              >
+                ☁
+              </motion.div>
+              <motion.div className="empty-title" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
+                Not connected
+              </motion.div>
+              <motion.div className="empty-blurb" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.35 }}>
+                Configure your bucket and region to get started.
+              </motion.div>
+              <motion.button
+                className="btn primary"
+                style={{ marginTop: 20 }}
+                onClick={() => setShowSettings(true)}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.5, type: 'spring', damping: 18, stiffness: 280 }}
+                whileHover={{ scale: 1.05, boxShadow: '0 0 20px rgba(155,92,246,0.5)' }}
+                whileTap={{ scale: 0.96 }}
+              >
                 Open settings
-              </button>
+              </motion.button>
             </div>
           ) : rows.length === 0 && folders.length === 0 && !loading ? (
-            <div className="empty">
-              <div className="empty-icon">&#8709;</div>
-              <div className="empty-title">{showingSearch ? 'No matches' : 'This folder is empty'}</div>
-              <div className="empty-blurb">{showingSearch ? 'Try a different search term.' : 'Upload files or drop them here.'}</div>
+            <div className="empty" style={{ position: 'relative', zIndex: 1 }}>
+              <motion.div
+                className="empty-icon"
+                animate={{ y: [0, -10, 0], opacity: [0.5, 1, 0.5] }}
+                transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
+              >
+                &#8709;
+              </motion.div>
+              <motion.div className="empty-title" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}>
+                {showingSearch ? 'No matches' : 'This folder is empty'}
+              </motion.div>
+              <motion.div className="empty-blurb" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}>
+                {showingSearch ? 'Try a different search term.' : 'Upload files or drop them here.'}
+              </motion.div>
             </div>
           ) : (
-            <table className="table">
+            <table className="table" style={{ position: 'relative', zIndex: 1 }}>
               <thead>
                 <tr>
                   <th style={{ width: '44%' }}>Name</th>
@@ -567,9 +761,13 @@ export const App: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {!showingSearch && folders.map(f => (
-                  <tr
+                {!showingSearch && folders.map((f, idx) => (
+                  <motion.tr
                     key={f}
+                    custom={idx}
+                    variants={rowVariants}
+                    initial="hidden"
+                    animate="visible"
                     onClick={() => navigate(f)}
                     onDragOver={e => { e.preventDefault(); e.stopPropagation(); setDragOverFolder(f); }}
                     onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOverFolder(null); }}
@@ -580,10 +778,16 @@ export const App: React.FC = () => {
                       if (key) { moveFile(key, f); draggedKeyRef.current = null; setDraggedKey(null); }
                     }}
                     className={dragOverFolder === f ? 'drag-target' : ''}
+                    whileHover={{ backgroundColor: 'rgba(155,92,246,0.06)' }}
+                    transition={{ backgroundColor: { duration: 0.1 } }}
                   >
                     <td>
                       <span className="cell-name">
-                        <span className="icon folder">&#10022;</span>
+                        <motion.span
+                          className="icon folder"
+                          animate={{ rotate: dragOverFolder === f ? [0, -10, 10, 0] : 0 }}
+                          transition={{ duration: 0.4 }}
+                        >&#10022;</motion.span>
                         {basename(f)}
                         {dragOverFolder === f && <span className="drag-drop-hint"> — drop here</span>}
                       </span>
@@ -592,26 +796,33 @@ export const App: React.FC = () => {
                     <td className="cell-modified">—</td>
                     <td>—</td>
                     <td></td>
-                  </tr>
+                  </motion.tr>
                 ))}
 
-                {rows.map(f => {
+                {rows.map((f, idx) => {
                   const info = tierInfo(String(f.storageClass));
                   const isArchived = !info.instantRetrieve;
                   const isDragging = draggedKey === f.key;
                   return (
-                    <tr
+                    <motion.tr
                       key={f.key}
+                      custom={folders.length + idx}
+                      variants={rowVariants}
+                      initial="hidden"
+                      animate="visible"
                       draggable
                       onDragStart={e => {
                         draggedKeyRef.current = f.key;
                         setDraggedKey(f.key);
-                        e.dataTransfer.effectAllowed = 'move';
-                        e.dataTransfer.setData('text/plain', f.key);
+                        const de = e as unknown as React.DragEvent;
+                        de.dataTransfer.effectAllowed = 'move';
+                        de.dataTransfer.setData('text/plain', f.key);
                       }}
                       onDragEnd={() => { draggedKeyRef.current = null; setDraggedKey(null); setDragOverFolder(null); }}
                       onClick={() => openFile(f)}
                       className={isDragging ? 'row-dragging' : ''}
+                      whileHover={{ backgroundColor: 'rgba(155,92,246,0.06)' }}
+                      transition={{ backgroundColor: { duration: 0.1 } }}
                     >
                       <td>
                         <span className="cell-name">
@@ -628,15 +839,15 @@ export const App: React.FC = () => {
                       <td onClick={e => e.stopPropagation()}>
                         <div className="row-actions" style={{ justifyContent: 'flex-end' }}>
                           {isArchived
-                            ? <button className="icon-btn" onClick={() => setRestoreTarget({ key: f.key, storageClass: f.storageClass })}>retrieve</button>
-                            : <button className="icon-btn" onClick={() => downloadFile(f.key)}>↓</button>
+                            ? <motion.button className="icon-btn" whileHover={{ scale: 1.12 }} whileTap={{ scale: 0.88 }} onClick={() => setRestoreTarget({ key: f.key, storageClass: f.storageClass })}>retrieve</motion.button>
+                            : <motion.button className="icon-btn" whileHover={{ scale: 1.12 }} whileTap={{ scale: 0.88 }} onClick={() => downloadFile(f.key)}>↓</motion.button>
                           }
-                          <button className="icon-btn" onClick={() => setShareKey(f.key)}>share</button>
-                          <button className="icon-btn" onClick={() => setVersionsKey(f.key)}>ver</button>
-                          <button className="icon-btn danger" onClick={() => deleteFile(f.key)}>×</button>
+                          <motion.button className="icon-btn" whileHover={{ scale: 1.12 }} whileTap={{ scale: 0.88 }} onClick={() => setShareKey(f.key)}>share</motion.button>
+                          <motion.button className="icon-btn" whileHover={{ scale: 1.12 }} whileTap={{ scale: 0.88 }} onClick={() => setVersionsKey(f.key)}>ver</motion.button>
+                          <motion.button className="icon-btn danger" whileHover={{ scale: 1.2, color: '#ff5d5d' }} whileTap={{ scale: 0.85 }} onClick={() => deleteFile(f.key)}>×</motion.button>
                         </div>
                       </td>
-                    </tr>
+                    </motion.tr>
                   );
                 })}
               </tbody>
@@ -648,7 +859,11 @@ export const App: React.FC = () => {
       {/* Status bar */}
       <div className="statusbar">
         <span>
-          <span className={`statusbar-dot ${config ? '' : 'disconnected'}`} />
+          <motion.span
+            className={`statusbar-dot ${config ? '' : 'disconnected'}`}
+            animate={config ? { opacity: [1, 0.35, 1], scale: [1, 1.4, 1] } : {}}
+            transition={{ duration: 2.5, repeat: Infinity, ease: 'easeInOut' }}
+          />
           {config ? `Connected · ${config.region}` : 'Not connected'}
         </span>
         <span>
@@ -660,27 +875,66 @@ export const App: React.FC = () => {
         </span>
       </div>
 
-      {(uploadJobs.length > 0 || downloadJobs.length > 0) && (
-        <UploadPanel
-          jobs={[...uploadJobs, ...downloadJobs]}
-          onDismiss={() => { setUploadJobs([]); setDownloadJobs([]); }}
-          onCancel={cancelUpload}
-        />
-      )}
+      <AnimatePresence>
+        {(uploadJobs.length > 0 || downloadJobs.length > 0) && (
+          <motion.div
+            key="transfer-panel"
+            initial={{ y: 80, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 80, opacity: 0 }}
+            transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+            style={{ position: 'fixed', bottom: 0, right: 24, zIndex: 90, minWidth: 340 }}
+          >
+            <UploadPanel
+              jobs={[...uploadJobs, ...downloadJobs]}
+              onDismiss={() => { setUploadJobs([]); setDownloadJobs([]); }}
+              onCancel={cancelUpload}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      {showSettings && (
-        <SettingsModal
-          configs={configs} activeIndex={activeIndex}
-          onClose={() => setShowSettings(false)}
-          onSave={saveConfig}
-          onSwitch={async (i) => { await switchBucket(i); setShowSettings(false); }}
-          onRemove={removeBucket}
-        />
-      )}
-      {showUpload && config && <UploadModal prefix={prefix} onClose={() => setShowUpload(false)} onUpload={handleUploadStart} />}
-      {showNewFolder && <NewFolderModal prefix={prefix} onClose={() => setShowNewFolder(false)} onCreate={createFolder} />}
-      {shareKey && <ShareModal objectKey={shareKey} onClose={() => setShareKey(null)} onToast={showToast} />}
-      {versionsKey && <VersionsModal objectKey={versionsKey} onClose={() => setVersionsKey(null)} onChanged={refresh} onToast={showToast} />}
+      <AnimatePresence>
+        {showSettings && (
+          <motion.div key="settings" className="modal-anim-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <SettingsModal
+              configs={configs} activeIndex={activeIndex}
+              onClose={() => setShowSettings(false)}
+              onSave={saveConfig}
+              onSwitch={async (i) => { await switchBucket(i); setShowSettings(false); }}
+              onRemove={removeBucket}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {showUpload && config && (
+          <motion.div key="upload" className="modal-anim-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <UploadModal prefix={prefix} onClose={() => setShowUpload(false)} onUpload={handleUploadStart} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {showNewFolder && (
+          <motion.div key="newfolder" className="modal-anim-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <NewFolderModal prefix={prefix} onClose={() => setShowNewFolder(false)} onCreate={createFolder} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {shareKey && (
+          <motion.div key="share" className="modal-anim-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <ShareModal objectKey={shareKey} onClose={() => setShareKey(null)} onToast={showToast} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {versionsKey && (
+          <motion.div key="versions" className="modal-anim-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <VersionsModal objectKey={versionsKey} onClose={() => setVersionsKey(null)} onChanged={refresh} onToast={showToast} />
+          </motion.div>
+        )}
+      </AnimatePresence>
       {previewKey && <PreviewModal objectKey={previewKey} onClose={() => setPreviewKey(null)} onToast={showToast} />}
       {showDashboard && <DashboardModal onClose={() => setShowDashboard(false)} onToast={showToast} />}
       {restoreTarget && (
@@ -698,7 +952,20 @@ export const App: React.FC = () => {
         />
       )}
 
-      {toast && <div className={`toast ${toast.kind}`}>{toast.msg}</div>}
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            key={toast.msg + toast.kind}
+            className={`toast ${toast.kind}`}
+            initial={{ x: 80, opacity: 0, scale: 0.92 }}
+            animate={{ x: 0, opacity: 1, scale: 1 }}
+            exit={{ x: 80, opacity: 0, scale: 0.92 }}
+            transition={{ type: 'spring', damping: 22, stiffness: 300 }}
+          >
+            {toast.msg}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

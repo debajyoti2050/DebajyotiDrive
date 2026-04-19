@@ -18,6 +18,10 @@ export interface StorageClassInfo {
   costTier: 1 | 2 | 3 | 4 | 5; // 1 = most expensive storage, 5 = cheapest
   instantRetrieve: boolean;
   minDays: number;
+  // us-east-1 reference pricing
+  storagePerGBMonth: number;   // USD per GB/month
+  retrievalPerGB: number;      // USD per GB retrieved (0 for standard tiers)
+  putPer1000: number;          // USD per 1000 PUT/COPY requests
 }
 
 // Catalog of storage classes with the trade-offs surfaced in the UI.
@@ -30,7 +34,10 @@ export const STORAGE_CLASSES: StorageClassInfo[] = [
     retrievalTime: 'Instant',
     costTier: 1,
     instantRetrieve: true,
-    minDays: 0
+    minDays: 0,
+    storagePerGBMonth: 0.023,
+    retrievalPerGB: 0,
+    putPer1000: 0.005,
   },
   {
     id: 'INTELLIGENT_TIERING',
@@ -39,7 +46,10 @@ export const STORAGE_CLASSES: StorageClassInfo[] = [
     retrievalTime: 'Instant (frequent/infrequent tiers)',
     costTier: 2,
     instantRetrieve: true,
-    minDays: 0
+    minDays: 0,
+    storagePerGBMonth: 0.023,
+    retrievalPerGB: 0,
+    putPer1000: 0.005,
   },
   {
     id: 'STANDARD_IA',
@@ -48,7 +58,10 @@ export const STORAGE_CLASSES: StorageClassInfo[] = [
     retrievalTime: 'Instant',
     costTier: 3,
     instantRetrieve: true,
-    minDays: 30
+    minDays: 30,
+    storagePerGBMonth: 0.0125,
+    retrievalPerGB: 0.01,
+    putPer1000: 0.01,
   },
   {
     id: 'ONEZONE_IA',
@@ -57,7 +70,10 @@ export const STORAGE_CLASSES: StorageClassInfo[] = [
     retrievalTime: 'Instant',
     costTier: 3,
     instantRetrieve: true,
-    minDays: 30
+    minDays: 30,
+    storagePerGBMonth: 0.01,
+    retrievalPerGB: 0.01,
+    putPer1000: 0.01,
   },
   {
     id: 'GLACIER_IR',
@@ -66,7 +82,10 @@ export const STORAGE_CLASSES: StorageClassInfo[] = [
     retrievalTime: 'Instant',
     costTier: 4,
     instantRetrieve: true,
-    minDays: 90
+    minDays: 90,
+    storagePerGBMonth: 0.004,
+    retrievalPerGB: 0.03,
+    putPer1000: 0.02,
   },
   {
     id: 'GLACIER',
@@ -75,7 +94,10 @@ export const STORAGE_CLASSES: StorageClassInfo[] = [
     retrievalTime: '1 min – 12 hr (depends on tier)',
     costTier: 4,
     instantRetrieve: false,
-    minDays: 90
+    minDays: 90,
+    storagePerGBMonth: 0.0036,
+    retrievalPerGB: 0.01,
+    putPer1000: 0.05,
   },
   {
     id: 'DEEP_ARCHIVE',
@@ -84,8 +106,11 @@ export const STORAGE_CLASSES: StorageClassInfo[] = [
     retrievalTime: '12 hr (standard) or 48 hr (bulk)',
     costTier: 5,
     instantRetrieve: false,
-    minDays: 180
-  }
+    minDays: 180,
+    storagePerGBMonth: 0.00099,
+    retrievalPerGB: 0.02,
+    putPer1000: 0.10,
+  },
 ];
 
 export interface S3Object {
