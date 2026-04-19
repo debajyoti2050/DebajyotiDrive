@@ -1,23 +1,22 @@
 import { app } from 'electron';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import type { AppConfig } from '@shared/types';
+import type { AppConfig, MultiConfig } from '@shared/types';
 
 const CONFIG_FILE = 'config.json';
 
 /**
- * Tiny config store. Lives in Electron's userData dir, which is OS-correct:
- *   macOS:   ~/Library/Application Support/S3Drive/
+ * Multi-bucket config store. Lives in Electron's userData dir:
  *   Windows: %APPDATA%/S3Drive/
+ *   macOS:   ~/Library/Application Support/S3Drive/
  *   Linux:   ~/.config/S3Drive/
  *
- * We deliberately do NOT store AWS credentials here — those come from
- * ~/.aws/credentials via the SDK's credential provider chain. Only the
- * bucket, region, and optional profile name live in our config.
+ * Stores a list of saved bucket+region configs with an active index.
+ * Backward-compatible: reads old single-config format and migrates it.
  */
 export class ConfigStore {
   private path: string;
-  private cache: AppConfig | null = null;
+  private cache: MultiConfig | null = null;
 
   constructor() {
     const dir = app.getPath('userData');
@@ -27,21 +26,75 @@ export class ConfigStore {
     }
   }
 
-  get(): AppConfig | null {
+  private save(mc: MultiConfig): void {
+    this.cache = mc;
+    writeFileSync(this.path, JSON.stringify(mc, null, 2), 'utf-8');
+  }
+
+  getAll(): MultiConfig | null {
     if (this.cache) return this.cache;
     if (!existsSync(this.path)) return null;
     try {
       const raw = readFileSync(this.path, 'utf-8');
-      this.cache = JSON.parse(raw) as AppConfig;
+      const parsed = JSON.parse(raw);
+      // Backward compat: old format had bucket/region at root level
+      if (parsed.bucket && parsed.region) {
+        this.cache = {
+          buckets: [{ bucket: parsed.bucket, region: parsed.region, profile: parsed.profile }],
+          activeIndex: 0
+        };
+      } else if (Array.isArray(parsed.buckets) && parsed.buckets.length > 0) {
+        this.cache = parsed as MultiConfig;
+      } else {
+        return null;
+      }
       return this.cache;
     } catch {
       return null;
     }
   }
 
+  get(): AppConfig | null {
+    const mc = this.getAll();
+    if (!mc || mc.buckets.length === 0) return null;
+    const idx = Math.max(0, Math.min(mc.activeIndex, mc.buckets.length - 1));
+    return mc.buckets[idx] ?? null;
+  }
+
+  /** Add or update a bucket config and make it the active bucket. */
   set(config: AppConfig): void {
-    this.cache = config;
-    writeFileSync(this.path, JSON.stringify(config, null, 2), 'utf-8');
+    let mc = this.getAll() ?? { buckets: [], activeIndex: 0 };
+    const existingIdx = mc.buckets.findIndex(
+      (b: AppConfig) => b.bucket === config.bucket && b.region === config.region
+    );
+    if (existingIdx >= 0) {
+      mc.buckets[existingIdx] = config;
+      mc.activeIndex = existingIdx;
+    } else {
+      mc.buckets.push(config);
+      mc.activeIndex = mc.buckets.length - 1;
+    }
+    this.save(mc);
+  }
+
+  /** Switch the active bucket by index. Returns the new active config, or null if invalid. */
+  setActive(index: number): AppConfig | null {
+    const mc = this.getAll();
+    if (!mc || index < 0 || index >= mc.buckets.length) return null;
+    mc.activeIndex = index;
+    this.save(mc);
+    return mc.buckets[index];
+  }
+
+  /** Remove a bucket by index. Won't remove the last one. */
+  remove(index: number): void {
+    const mc = this.getAll();
+    if (!mc || mc.buckets.length <= 1) return;
+    mc.buckets.splice(index, 1);
+    if (mc.activeIndex >= mc.buckets.length) {
+      mc.activeIndex = mc.buckets.length - 1;
+    }
+    this.save(mc);
   }
 
   clear(): void {

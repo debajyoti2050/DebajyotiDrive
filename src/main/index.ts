@@ -6,6 +6,7 @@ import { ConfigStore } from './configStore';
 import type {
   AppConfig,
   BucketAnalytics,
+  MultiConfig,
   RestoreRequest,
   Result,
   S3Object,
@@ -99,6 +100,28 @@ function registerIpcHandlers() {
     return cfg;
   }));
 
+  ipcMain.handle('config:getAll', async (): Promise<Result<MultiConfig | null>> =>
+    safe(async () => configStore.getAll())
+  );
+
+  ipcMain.handle('config:setActive', async (_e, index: number): Promise<Result<AppConfig | null>> =>
+    safe(async () => {
+      const cfg = configStore.setActive(index);
+      if (!cfg) throw new Error('Invalid bucket index');
+      s3 = new S3Service(cfg);
+      return cfg;
+    })
+  );
+
+  ipcMain.handle('config:remove', async (_e, index: number): Promise<Result<true>> =>
+    safe(async () => {
+      configStore.remove(index);
+      const active = configStore.get();
+      if (active) s3 = new S3Service(active);
+      return true as const;
+    })
+  );
+
   // ===== Browse =====
   ipcMain.handle('s3:list', async (_e, prefix: string) =>
     safe(async () => requireS3().list(prefix))
@@ -137,8 +160,16 @@ function registerIpcHandlers() {
       defaultPath: args.key.split('/').pop() ?? 'download'
     });
     if (res.canceled || !res.filePath) return null;
-    await requireS3().download(args.key, res.filePath, args.versionId);
+    await requireS3().download(args.key, res.filePath, args.versionId, (p) => {
+      mainWindow?.webContents.send('s3:downloadProgress', p);
+    });
     return res.filePath;
+  }));
+
+  // ===== Cancel upload =====
+  ipcMain.handle('s3:cancelUpload', async (_e, key: string) => safe(async () => {
+    requireS3().cancelUpload(key);
+    return true as const;
   }));
 
   // ===== Preview =====
@@ -209,6 +240,11 @@ function registerIpcHandlers() {
   // ===== Create folder =====
   ipcMain.handle('s3:createFolder', async (_e, key: string) =>
     safe(async () => { await requireS3().createFolder(key); return true; })
+  );
+
+  // ===== Move (copy + delete) =====
+  ipcMain.handle('s3:move', async (_e, args: { sourceKey: string; destKey: string }) =>
+    safe(async () => { await requireS3().move(args.sourceKey, args.destKey); return true as const; })
   );
 
   // ===== Analytics =====

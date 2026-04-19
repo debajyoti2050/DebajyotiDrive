@@ -3,6 +3,7 @@ console.log('[Preload] starting — contextBridge available:', typeof contextBri
 import type {
   AppConfig,
   BucketAnalytics,
+  MultiConfig,
   RestoreRequest,
   Result,
   S3Object,
@@ -16,7 +17,10 @@ import type {
 const api = {
   config: {
     get: (): Promise<Result<AppConfig | null>> => ipcRenderer.invoke('config:get'),
+    getAll: (): Promise<Result<MultiConfig | null>> => ipcRenderer.invoke('config:getAll'),
     set: (cfg: AppConfig): Promise<Result<AppConfig>> => ipcRenderer.invoke('config:set', cfg),
+    setActive: (index: number): Promise<Result<AppConfig | null>> => ipcRenderer.invoke('config:setActive', index),
+    remove: (index: number): Promise<Result<true>> => ipcRenderer.invoke('config:remove', index),
     onConnectLog: (cb: (msg: string) => void): (() => void) => {
       const listener = (_e: unknown, msg: string) => cb(msg);
       ipcRenderer.on('s3:connectLog', listener);
@@ -54,10 +58,19 @@ const api = {
       ipcRenderer.invoke('s3:analytics'),
     createFolder: (key: string): Promise<Result<true>> =>
       ipcRenderer.invoke('s3:createFolder', key),
+    move: (args: { sourceKey: string; destKey: string }): Promise<Result<true>> =>
+      ipcRenderer.invoke('s3:move', args),
+    cancelUpload: (key: string): Promise<Result<true>> =>
+      ipcRenderer.invoke('s3:cancelUpload', key),
     onUploadProgress: (cb: (p: UploadProgress) => void): (() => void) => {
       const listener = (_e: unknown, p: UploadProgress) => cb(p);
       ipcRenderer.on('s3:uploadProgress', listener);
       return () => ipcRenderer.removeListener('s3:uploadProgress', listener);
+    },
+    onDownloadProgress: (cb: (p: UploadProgress) => void): (() => void) => {
+      const listener = (_e: unknown, p: UploadProgress) => cb(p);
+      ipcRenderer.on('s3:downloadProgress', listener);
+      return () => ipcRenderer.removeListener('s3:downloadProgress', listener);
     }
   },
   dialog: {

@@ -115,6 +115,11 @@ export interface AppConfig {
   profile?: string;
 }
 
+export interface MultiConfig {
+  buckets: AppConfig[];
+  activeIndex: number;
+}
+
 export interface UploadRequest {
   localPath: string;
   key: string;
@@ -152,6 +157,7 @@ export interface BucketAnalytics {
   recentFiles: S3Object[];       // top 10 by lastModified
   scannedAt: string;             // ISO
   capped: boolean;               // true if scan hit the 50k object limit
+  region: string;                // region whose pricing was used
 }
 
 // Result wrapper so the renderer can render errors instead of throwing.

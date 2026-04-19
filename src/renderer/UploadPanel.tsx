@@ -12,31 +12,46 @@ export interface UploadJob {
   error?: string;
   startTime: number;
   speed: number; // bytes/sec
+  type?: 'upload' | 'download';
 }
 
 interface Props {
   jobs: UploadJob[];
   onDismiss: () => void;
+  onCancel?: (id: string) => void;
 }
 
-export const UploadPanel: React.FC<Props> = ({ jobs, onDismiss }) => {
+function formatEta(seconds: number): string {
+  if (!isFinite(seconds) || seconds <= 0) return '';
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+export const UploadPanel: React.FC<Props> = ({ jobs, onDismiss, onCancel }) => {
   const [minimized, setMinimized] = useState(false);
 
   const total = jobs.length;
   const done = jobs.filter(j => j.done).length;
-  const errors = jobs.filter(j => j.error).length;
+  const errors = jobs.filter(j => j.error && j.error !== 'Cancelled').length;
   const allDone = done === total;
   const overallPct = total === 0 ? 0
     : Math.round(jobs.reduce((s, j) => s + (j.total > 0 ? j.loaded / j.total : 0), 0) / total * 100);
 
+  const activeUploads = jobs.filter(j => !j.done && j.type !== 'download');
+  const activeDownloads = jobs.filter(j => !j.done && j.type === 'download');
+  const headerLabel = allDone
+    ? errors > 0 ? `${errors} failed` : `${total} complete`
+    : [
+        activeUploads.length > 0 && `Uploading ${activeUploads.length}`,
+        activeDownloads.length > 0 && `Downloading ${activeDownloads.length}`,
+      ].filter(Boolean).join(' · ') || `${done}/${total}`;
+
   return (
     <div className="upload-panel">
       <div className="upload-panel-header" onClick={() => setMinimized(m => !m)}>
-        <span className="upload-panel-title">
-          {allDone
-            ? errors > 0 ? `${errors} failed` : `${total} uploaded`
-            : `Uploading ${done}/${total}`}
-        </span>
+        <span className="upload-panel-title">{headerLabel}</span>
         <span className="upload-panel-pct">{allDone ? '' : `${overallPct}%`}</span>
         <div className="upload-panel-controls">
           <button className="icon-btn" onClick={e => { e.stopPropagation(); setMinimized(m => !m); }}>
@@ -52,22 +67,35 @@ export const UploadPanel: React.FC<Props> = ({ jobs, onDismiss }) => {
         <div className="upload-panel-body">
           {jobs.map(j => {
             const pct = j.total > 0 ? Math.round(j.loaded / j.total * 100) : 0;
+            const eta = !j.done && j.speed > 0 && j.total > 0
+              ? formatEta((j.total - j.loaded) / j.speed)
+              : '';
+            const isUpload = j.type !== 'download';
+            const canCancel = !j.done && isUpload && onCancel;
+
             return (
               <div key={j.id} className="upload-panel-row">
                 <div className="upload-panel-row-name">
                   <span className="upload-panel-icon">
-                    {j.error ? '✗' : j.done ? '✓' : '↑'}
+                    {j.error ? '✗' : j.done ? '✓' : isUpload ? '↑' : '↓'}
                   </span>
                   <span className="upload-panel-filename" title={j.name}>{j.name}</span>
                   <span className="upload-panel-meta">
                     {j.error
-                      ? <span style={{ color: 'var(--danger)' }}>{j.error}</span>
+                      ? <span style={{ color: j.error === 'Cancelled' ? 'var(--text-muted)' : 'var(--danger)' }}>{j.error}</span>
                       : j.done
-                        ? <span style={{ color: 'var(--success)' }}>Done</span>
+                        ? <span style={{ color: 'var(--success)' }}>Done · {formatBytes(j.total)}</span>
                         : j.speed > 0
-                          ? `${formatBytes(j.speed)}/s · ${pct}%`
-                          : `${pct}%`}
+                          ? `${formatBytes(j.speed)}/s · ${pct}%${eta ? ` · ${eta} left` : ''}`
+                          : j.total > 0 ? `${pct}%` : 'Waiting…'}
                   </span>
+                  {canCancel && (
+                    <button
+                      className="upload-cancel-btn"
+                      title="Cancel upload"
+                      onClick={() => onCancel(j.id)}
+                    >×</button>
+                  )}
                 </div>
                 <div className="upload-bar" style={{ marginTop: 4 }}>
                   <div

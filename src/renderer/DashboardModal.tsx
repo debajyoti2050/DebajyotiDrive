@@ -8,11 +8,18 @@ interface Props {
   onToast: (msg: string, kind?: 'info' | 'error' | 'success') => void;
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// 1 USD ≈ 84 INR (approximate; update periodically)
+const USD_TO_INR = 84;
 
-function formatCost(usd: number): string {
+function formatINR(usd: number): string {
+  const inr = usd * USD_TO_INR;
+  if (inr < 1) return '< ₹1';
+  if (inr < 1000) return `₹${inr.toFixed(0)}`;
+  return `₹${Math.round(inr).toLocaleString('en-IN')}`;
+}
+
+function formatUSD(usd: number): string {
   if (usd < 0.005) return '< $0.01';
-  if (usd < 1)     return `$${usd.toFixed(2)}`;
   return `$${usd.toFixed(2)}`;
 }
 
@@ -63,8 +70,8 @@ function DonutChart({ slices }: { slices: DonutSlice[] }) {
   return (
     <svg viewBox="0 0 200 200" width="160" height="160" style={{ display: 'block' }}>
       {paths}
-      <text x="100" y="95"  textAnchor="middle" fill="var(--text-faint)" fontSize="9" fontFamily="var(--mono)" letterSpacing="0.08em">STORAGE</text>
-      <text x="100" y="110" textAnchor="middle" fill="var(--text)"       fontSize="9" fontFamily="var(--mono)" letterSpacing="0.08em">BY TIER</text>
+      <text x="100" y="95"  textAnchor="middle" fill="var(--text-faint)" fontSize="9" fontFamily="inherit" letterSpacing="0.08em">STORAGE</text>
+      <text x="100" y="110" textAnchor="middle" fill="var(--text)"       fontSize="9" fontFamily="inherit" letterSpacing="0.08em">BY TIER</text>
     </svg>
   );
 }
@@ -98,7 +105,9 @@ function TierRow({ t, maxBytes }: { t: TierStats; maxBytes: number }) {
       <div className="dash-tier-meta">
         <span>{formatBytes(t.totalBytes)}</span>
         <span className="dash-tier-count">{t.count.toLocaleString()} obj</span>
-        <span className="dash-tier-cost">{formatCost(t.estimatedMonthlyCost)}/mo</span>
+        <span className="dash-tier-cost" title={formatUSD(t.estimatedMonthlyCost) + '/mo'}>
+          {formatINR(t.estimatedMonthlyCost)}/mo
+        </span>
       </div>
     </div>
   );
@@ -147,7 +156,7 @@ export const DashboardModal: React.FC<Props> = ({ onClose, onToast }) => {
             Bucket analytics
             {data && (
               <span className="dash-scan-time">
-                scanned {formatDate(data.scannedAt)}
+                {data.region} · scanned {formatDate(data.scannedAt)}
                 {data.capped && ' · partial (50k cap)'}
               </span>
             )}
@@ -161,7 +170,6 @@ export const DashboardModal: React.FC<Props> = ({ onClose, onToast }) => {
         </div>
 
         <div className="modal-body" style={{ padding: 0 }}>
-          {/* loading */}
           {loading && !data && (
             <div className="dash-loading">
               <div className="dash-spinner" />
@@ -169,14 +177,12 @@ export const DashboardModal: React.FC<Props> = ({ onClose, onToast }) => {
             </div>
           )}
 
-          {/* no data yet */}
           {!loading && !scanned && (
             <div className="dash-loading">
               <button className="btn primary" onClick={scan}>Scan bucket</button>
             </div>
           )}
 
-          {/* results */}
           {data && (
             <div className="dash-body">
               {/* stat cards */}
@@ -193,13 +199,13 @@ export const DashboardModal: React.FC<Props> = ({ onClose, onToast }) => {
                 />
                 <StatCard
                   label="Est. monthly cost"
-                  value={formatCost(data.estimatedMonthlyCost)}
-                  sub="storage only · us-east-1"
+                  value={formatINR(data.estimatedMonthlyCost)}
+                  sub={`${formatUSD(data.estimatedMonthlyCost)} · ${data.region}`}
                 />
                 <StatCard
                   label="Est. annual cost"
-                  value={formatCost(data.estimatedMonthlyCost * 12)}
-                  sub="projection"
+                  value={formatINR(data.estimatedMonthlyCost * 12)}
+                  sub={`${formatUSD(data.estimatedMonthlyCost * 12)} · projection`}
                 />
               </div>
 
@@ -221,7 +227,6 @@ export const DashboardModal: React.FC<Props> = ({ onClose, onToast }) => {
                     ? <DonutChart slices={donutSlices} />
                     : <div style={{ color: 'var(--text-faint)', fontSize: 12 }}>No data.</div>
                   }
-                  {/* legend */}
                   <div className="dash-legend">
                     {data.byTier.map(t => (
                       <div key={t.storageClass} className="dash-legend-row">
@@ -236,6 +241,11 @@ export const DashboardModal: React.FC<Props> = ({ onClose, onToast }) => {
                     ))}
                   </div>
                 </div>
+              </div>
+
+              {/* pricing note */}
+              <div style={{ padding: '8px 24px', fontSize: 11, color: 'var(--text-faint)', borderTop: '1px solid var(--line)' }}>
+                Prices in ₹ (1 USD = ₹{USD_TO_INR}) · {data.region} storage rates · storage cost only, excludes requests & data transfer
               </div>
 
               {/* bottom tables */}

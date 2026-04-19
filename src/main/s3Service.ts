@@ -15,6 +15,7 @@ import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createReadStream, createWriteStream, statSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
+import { Transform } from 'node:stream';
 import type { Readable } from 'node:stream';
 import { fromEnv, fromIni } from '@aws-sdk/credential-providers';
 import { config as loadEnv } from 'dotenv';
@@ -42,9 +43,12 @@ const PART_SIZE = 5 * 1024 * 1024;
 export class S3Service {
   private client: S3Client;
   private bucket: string;
+  private region: string;
+  private activeUploads = new Map<string, Upload>();
 
   constructor(config: AppConfig) {
     this.bucket = config.bucket;
+    this.region = config.region;
     // Use explicit providers so the SDK never falls through to EC2 IMDS,
     // which hangs indefinitely on non-EC2 machines.
     const credentials = config.profile
@@ -138,56 +142,54 @@ export class S3Service {
     const stat = statSync(req.localPath);
     const stream = createReadStream(req.localPath);
 
-    try {
-      if (stat.size >= MULTIPART_THRESHOLD) {
-        const uploader = new Upload({
-          client: this.client,
-          partSize: PART_SIZE,
-          queueSize: 4, // 4 concurrent parts is a reasonable default for desktop bandwidth
-          params: {
-            Bucket: this.bucket,
-            Key: req.key,
-            Body: stream,
-            StorageClass: req.storageClass
-          }
-        });
-
-        uploader.on('httpUploadProgress', (p) => {
-          onProgress({
-            key: req.key,
-            loaded: p.loaded ?? 0,
-            total: p.total ?? stat.size,
-            done: false
-          });
-        });
-
-        await uploader.done();
-      } else {
-        // For small files, single PutObject through the Upload helper
-        // (still works, just won't multipart).
-        const uploader = new Upload({
-          client: this.client,
-          params: {
-            Bucket: this.bucket,
-            Key: req.key,
-            Body: stream,
-            StorageClass: req.storageClass
-          }
-        });
-        await uploader.done();
-        onProgress({ key: req.key, loaded: stat.size, total: stat.size, done: false });
+    const uploader = new Upload({
+      client: this.client,
+      partSize: PART_SIZE,
+      queueSize: stat.size >= MULTIPART_THRESHOLD ? 4 : 1,
+      params: {
+        Bucket: this.bucket,
+        Key: req.key,
+        Body: stream,
+        StorageClass: req.storageClass
       }
+    });
 
+    this.activeUploads.set(req.key, uploader);
+
+    uploader.on('httpUploadProgress', (p) => {
+      onProgress({
+        key: req.key,
+        loaded: p.loaded ?? 0,
+        total: p.total ?? stat.size,
+        done: false
+      });
+    });
+
+    try {
+      await uploader.done();
+      this.activeUploads.delete(req.key);
       onProgress({ key: req.key, loaded: stat.size, total: stat.size, done: true });
     } catch (err) {
+      this.activeUploads.delete(req.key);
+      const cancelled = (err as any)?.name === 'AbortError'
+        || (err as any)?.name === 'RequestAbortedError'
+        || String(err).toLowerCase().includes('aborted');
       onProgress({
         key: req.key,
         loaded: 0,
         total: stat.size,
         done: true,
-        error: err instanceof Error ? err.message : String(err)
+        error: cancelled ? 'Cancelled' : err instanceof Error ? err.message : String(err)
       });
-      throw err;
+      if (!cancelled) throw err;
+    }
+  }
+
+  cancelUpload(key: string): void {
+    const uploader = this.activeUploads.get(key);
+    if (uploader) {
+      uploader.abort();
+      this.activeUploads.delete(key);
     }
   }
 
@@ -195,7 +197,12 @@ export class S3Service {
    * Download an object to a local path. Streams to disk so we don't load
    * giant files into memory.
    */
-  async download(key: string, localPath: string, versionId?: string): Promise<void> {
+  async download(
+    key: string,
+    localPath: string,
+    versionId?: string,
+    onProgress?: (p: UploadProgress) => void
+  ): Promise<void> {
     const res = await this.client.send(new GetObjectCommand({
       Bucket: this.bucket,
       Key: key,
@@ -204,7 +211,23 @@ export class S3Service {
 
     if (!res.Body) throw new Error('Empty response body');
     const body = res.Body as Readable;
-    await pipeline(body, createWriteStream(localPath));
+    const total = res.ContentLength ?? 0;
+    let loaded = 0;
+
+    if (onProgress && total > 0) {
+      const tracker = new Transform({
+        transform(chunk: Buffer, _enc, cb) {
+          loaded += chunk.length;
+          onProgress({ key, loaded, total, done: false });
+          cb(null, chunk);
+        }
+      });
+      await pipeline(body, tracker, createWriteStream(localPath));
+    } else {
+      await pipeline(body, createWriteStream(localPath));
+    }
+
+    onProgress?.({ key, loaded: total || loaded, total: total || loaded, done: true });
   }
 
   /**
@@ -316,16 +339,32 @@ export class S3Service {
     }));
   }
 
-  // Storage cost per GB/month in USD (us-east-1 list prices, storage only).
-  private static readonly COST_PER_GB: Record<string, number> = {
-    STANDARD:             0.023,
-    INTELLIGENT_TIERING:  0.023,
-    STANDARD_IA:          0.0125,
-    ONEZONE_IA:           0.01,
-    GLACIER_IR:           0.004,
-    GLACIER:              0.0036,
-    DEEP_ARCHIVE:         0.00099,
+  // Storage cost per GB/month in USD by region (AWS list prices, storage only).
+  private static readonly REGION_COST_PER_GB: Record<string, Record<string, number>> = {
+    'us-east-1':    { STANDARD: 0.023,  INTELLIGENT_TIERING: 0.023,  STANDARD_IA: 0.0125, ONEZONE_IA: 0.01,  GLACIER_IR: 0.004,  GLACIER: 0.0036, DEEP_ARCHIVE: 0.00099 },
+    'us-east-2':    { STANDARD: 0.023,  INTELLIGENT_TIERING: 0.023,  STANDARD_IA: 0.0125, ONEZONE_IA: 0.01,  GLACIER_IR: 0.004,  GLACIER: 0.0036, DEEP_ARCHIVE: 0.00099 },
+    'us-west-1':    { STANDARD: 0.026,  INTELLIGENT_TIERING: 0.026,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
+    'us-west-2':    { STANDARD: 0.023,  INTELLIGENT_TIERING: 0.023,  STANDARD_IA: 0.0125, ONEZONE_IA: 0.01,  GLACIER_IR: 0.004,  GLACIER: 0.0036, DEEP_ARCHIVE: 0.00099 },
+    'eu-west-1':    { STANDARD: 0.023,  INTELLIGENT_TIERING: 0.023,  STANDARD_IA: 0.0125, ONEZONE_IA: 0.01,  GLACIER_IR: 0.004,  GLACIER: 0.0036, DEEP_ARCHIVE: 0.00099 },
+    'eu-west-2':    { STANDARD: 0.024,  INTELLIGENT_TIERING: 0.024,  STANDARD_IA: 0.013,  ONEZONE_IA: 0.0104,GLACIER_IR: 0.0042, GLACIER: 0.0038, DEEP_ARCHIVE: 0.0011  },
+    'eu-central-1': { STANDARD: 0.0245, INTELLIGENT_TIERING: 0.0245, STANDARD_IA: 0.013,  ONEZONE_IA: 0.01,  GLACIER_IR: 0.0044, GLACIER: 0.0039, DEEP_ARCHIVE: 0.00099 },
+    'ap-south-1':   { STANDARD: 0.025,  INTELLIGENT_TIERING: 0.025,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
+    'ap-south-2':   { STANDARD: 0.025,  INTELLIGENT_TIERING: 0.025,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
+    'ap-southeast-1':{ STANDARD: 0.025, INTELLIGENT_TIERING: 0.025,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
+    'ap-southeast-2':{ STANDARD: 0.025, INTELLIGENT_TIERING: 0.025,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
+    'ap-northeast-1':{ STANDARD: 0.025, INTELLIGENT_TIERING: 0.025,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
+    'ap-northeast-2':{ STANDARD: 0.025, INTELLIGENT_TIERING: 0.025,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
+    'ca-central-1': { STANDARD: 0.024,  INTELLIGENT_TIERING: 0.024,  STANDARD_IA: 0.013,  ONEZONE_IA: 0.0104,GLACIER_IR: 0.0042, GLACIER: 0.0038, DEEP_ARCHIVE: 0.00099 },
+    'sa-east-1':    { STANDARD: 0.0405, INTELLIGENT_TIERING: 0.0405, STANDARD_IA: 0.0225, ONEZONE_IA: 0.018, GLACIER_IR: 0.0073, GLACIER: 0.0066, DEEP_ARCHIVE: 0.0018  },
+    'me-south-1':   { STANDARD: 0.0252, INTELLIGENT_TIERING: 0.0252, STANDARD_IA: 0.014,  ONEZONE_IA: 0.011, GLACIER_IR: 0.0046, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
+    'af-south-1':   { STANDARD: 0.0275, INTELLIGENT_TIERING: 0.0275, STANDARD_IA: 0.0152, ONEZONE_IA: 0.012, GLACIER_IR: 0.005,  GLACIER: 0.0045, DEEP_ARCHIVE: 0.0012  },
   };
+
+  private costPerGB(sc: string): number {
+    const table = S3Service.REGION_COST_PER_GB[this.region]
+      ?? S3Service.REGION_COST_PER_GB['us-east-1'];
+    return table[sc] ?? 0.023;
+  }
 
   async getAnalytics(): Promise<BucketAnalytics> {
     const CAP = 50_000;
@@ -365,7 +404,7 @@ export class S3Service {
         storageClass: sc,
         count: s.count,
         totalBytes: s.bytes,
-        estimatedMonthlyCost: (s.bytes / 1024 ** 3) * (S3Service.COST_PER_GB[sc] ?? 0.023)
+        estimatedMonthlyCost: (s.bytes / 1024 ** 3) * this.costPerGB(sc)
       }))
       .sort((a, b) => b.totalBytes - a.totalBytes);
 
@@ -385,7 +424,8 @@ export class S3Service {
       largestFiles,
       recentFiles,
       scannedAt: new Date().toISOString(),
-      capped: all.length >= CAP
+      capped: all.length >= CAP,
+      region: this.region
     };
   }
 
@@ -463,6 +503,20 @@ export class S3Service {
       Bucket: this.bucket,
       Key: key,
       Body: ''
+    }));
+  }
+
+  /** Move an object by copying to the new key then deleting the source. */
+  async move(sourceKey: string, destKey: string): Promise<void> {
+    await this.client.send(new CopyObjectCommand({
+      Bucket: this.bucket,
+      Key: destKey,
+      CopySource: `${this.bucket}/${encodeURIComponent(sourceKey)}`,
+      MetadataDirective: 'COPY'
+    }));
+    await this.client.send(new DeleteObjectCommand({
+      Bucket: this.bucket,
+      Key: sourceKey
     }));
   }
 }
