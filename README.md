@@ -5,6 +5,33 @@ S3Drive — a Google Drive alternative that runs on Amazon S3. A pay-as-you-go c
 
 Short description: Fast desktop client for S3-backed storage, ideal for teams and power users who want a Drive-style interface with transparent, per-object pricing and archive support.
 
+---
+
+## 🚀 Quick Start (3 steps)
+
+1. **Clone & install**
+   ```bash
+   git clone <repo-url>
+   cd s3drive
+   npm install
+   ```
+
+2. **Configure AWS credentials**
+   ```bash
+   aws configure --profile s3drive
+   ```
+   Or set environment variables: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+
+3. **Create an S3 bucket** (or use an existing one)
+   - Go to [AWS S3 Console](https://s3.console.aws.amazon.com)
+   - Click "Create bucket" and choose a name and region
+   - Launch S3Drive: `npm run dev`
+   - Enter your bucket name and region in Settings
+
+That's it! You now have a Google Drive-like interface for your S3 bucket.
+
+---
+
 ## Why choose S3Drive — a pay-as-you-go Drive alternative
 
 If you search for "Google Drive alternative" or "pay as you go cloud drive", S3Drive is built for that use case: Drive-style convenience with S3's cost model. It's an excellent fit when you want:
