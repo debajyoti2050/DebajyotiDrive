@@ -143,8 +143,10 @@ export interface S3ObjectVersion {
 export interface AppConfig {
   region: string;
   bucket: string;
-  // Credentials live in ~/.aws/credentials by default (we use the AWS shared config provider).
-  // Optionally a named profile to switch identities.
+  // Explicit credentials — preferred for packaged desktop app where ~/.aws may not exist.
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  // Named profile from ~/.aws/credentials, used when explicit keys are not set.
   profile?: string;
 }
 

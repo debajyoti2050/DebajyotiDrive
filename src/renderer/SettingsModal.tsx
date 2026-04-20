@@ -24,12 +24,23 @@ export const SettingsModal: React.FC<Props> = ({
 }) => {
   const [bucket, setBucket] = useState('');
   const [region, setRegion] = useState('');
+  const [accessKeyId, setAccessKeyId] = useState('');
+  const [secretAccessKey, setSecretAccessKey] = useState('');
   const [profile, setProfile] = useState('');
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [showForm, setShowForm] = useState(configs.length === 0);
   const logEndRef = useRef<HTMLDivElement>(null);
+
+  // When all buckets are removed, automatically show the add form with cleared fields
+  useEffect(() => {
+    if (configs.length === 0) {
+      setBucket(''); setRegion(''); setAccessKeyId(''); setSecretAccessKey(''); setProfile('');
+      setError(null); setLogs([]);
+      setShowForm(true);
+    }
+  }, [configs.length]);
 
   useEffect(() => {
     const fn = window.s3drive?.config?.onConnectLog;
@@ -49,11 +60,17 @@ export const SettingsModal: React.FC<Props> = ({
     setLogs([]);
     setTesting(true);
     try {
-      const err = await onSave({ bucket: bucket.trim(), region: region.trim(), profile: profile.trim() || undefined });
+      const err = await onSave({
+        bucket: bucket.trim(),
+        region: region.trim(),
+        accessKeyId: accessKeyId.trim() || undefined,
+        secretAccessKey: secretAccessKey.trim() || undefined,
+        profile: profile.trim() || undefined,
+      });
       if (err) {
         setError(err);
       } else {
-        setBucket(''); setRegion(''); setProfile('');
+        setBucket(''); setRegion(''); setAccessKeyId(''); setSecretAccessKey(''); setProfile('');
         setShowForm(false);
       }
     } catch (e) {
@@ -101,15 +118,13 @@ export const SettingsModal: React.FC<Props> = ({
                       {i === activeIndex && (
                         <span style={{ fontSize: 11, color: 'var(--success)', padding: '4px 10px' }}>Active</span>
                       )}
-                      {configs.length > 1 && (
-                        <button
-                          className="btn danger"
-                          style={{ padding: '4px 8px', fontSize: 11 }}
-                          onClick={() => onRemove(i)}
-                        >
-                          ×
-                        </button>
-                      )}
+                      <button
+                        className="btn danger"
+                        style={{ padding: '4px 8px', fontSize: 11 }}
+                        onClick={() => onRemove(i)}
+                      >
+                        ×
+                      </button>
                     </div>
                   </div>
                 ))}
@@ -119,7 +134,11 @@ export const SettingsModal: React.FC<Props> = ({
 
           {/* Toggle add form */}
           {!showForm && (
-            <button className="btn" onClick={() => setShowForm(true)} style={{ marginBottom: 4 }}>
+            <button className="btn" onClick={() => {
+              setBucket(''); setRegion(''); setAccessKeyId(''); setSecretAccessKey(''); setProfile('');
+              setError(null); setLogs([]);
+              setShowForm(true);
+            }} style={{ marginBottom: 4 }}>
               + Add bucket
             </button>
           )}
@@ -167,16 +186,42 @@ export const SettingsModal: React.FC<Props> = ({
                 <div className="field-help">Must match the region your bucket was created in.</div>
               </div>
               <div className="field">
+                <label className="field-label">Access Key ID</label>
+                <input
+                  className="field-input"
+                  value={accessKeyId}
+                  onChange={e => { setAccessKeyId(e.target.value); setError(null); }}
+                  placeholder="AKIAIOSFODNN7EXAMPLE"
+                  autoComplete="off"
+                  disabled={testing}
+                />
+              </div>
+              <div className="field">
+                <label className="field-label">Secret Access Key</label>
+                <input
+                  className="field-input"
+                  type="password"
+                  value={secretAccessKey}
+                  onChange={e => { setSecretAccessKey(e.target.value); setError(null); }}
+                  placeholder="••••••••••••••••••••••••••••••••••••••••"
+                  autoComplete="off"
+                  disabled={testing}
+                />
+                <div className="field-help">
+                  Stored locally. Leave blank to use an AWS profile or <code>~/.aws/credentials</code>.
+                </div>
+              </div>
+              <div className="field">
                 <label className="field-label">AWS profile (optional)</label>
                 <input
                   className="field-input"
                   value={profile}
                   onChange={e => setProfile(e.target.value)}
                   placeholder="default"
-                  disabled={testing}
+                  disabled={testing || !!(accessKeyId.trim())}
                 />
                 <div className="field-help">
-                  Named profile from <code>~/.aws/credentials</code>, or leave blank for env vars / default chain.
+                  Named profile from <code>~/.aws/credentials</code>. Ignored when Access Key ID is set.
                 </div>
               </div>
             </>

@@ -81,6 +81,41 @@ function buildParallelPath(lat: number, lon0: number, R: number, cx: number, cy:
   ).join('');
 }
 
+// Simplified continent coastlines as [lat, lon][] polygons
+const CONTINENT_OUTLINES: [number, number][][] = [
+  // North America
+  [[70,-140],[72,-96],[68,-76],[62,-68],[47,-53],[44,-66],[38,-75],[25,-80],[24,-82],[29,-88],[26,-97],[22,-97],[20,-100],[18,-107],[22,-110],[28,-110],[31,-117],[33,-117],[38,-122],[46,-124],[50,-127],[56,-130],[60,-140],[70,-140]],
+  // Greenland
+  [[60,-43],[63,-51],[68,-53],[75,-60],[82,-65],[83,-36],[76,-18],[70,-22],[65,-37],[60,-43]],
+  // South America
+  [[11,-72],[10,-62],[5,-53],[1,-51],[-5,-35],[-8,-35],[-13,-39],[-20,-40],[-23,-43],[-33,-52],[-40,-62],[-45,-65],[-50,-69],[-55,-68],[-46,-74],[-38,-58],[-22,-43],[-5,-35],[5,-52],[8,-60],[11,-72]],
+  // Europe
+  [[71,28],[69,18],[64,14],[58,5],[51,2],[48,-5],[43,-9],[36,-6],[39,-9],[43,-1],[46,12],[44,14],[40,18],[40,28],[44,33],[46,30],[49,32],[55,22],[57,21],[60,24],[60,20],[58,10],[55,8],[57,10],[60,5],[64,14],[67,14],[71,28]],
+  // Africa
+  [[37,10],[32,32],[22,37],[11,43],[4,42],[0,42],[-5,40],[-10,40],[-16,35],[-26,33],[-34,26],[-35,20],[-20,13],[-10,13],[0,8],[4,2],[5,-3],[10,-15],[20,-17],[25,-15],[33,-8],[37,10]],
+  // Asia (West+Central)
+  [[70,30],[72,50],[70,70],[72,100],[68,130],[60,140],[55,135],[50,140],[45,132],[39,122],[30,122],[22,114],[12,109],[5,100],[1,104],[8,98],[20,92],[25,95],[28,88],[27,84],[25,72],[16,74],[8,77],[0,73],[22,60],[26,56],[30,60],[35,60],[38,68],[40,66],[44,50],[48,48],[54,54],[60,58],[65,60],[70,60],[72,50],[70,30]],
+  // Australia
+  [[-14,126],[-12,130],[-12,136],[-16,136],[-16,140],[-20,148],[-24,152],[-28,154],[-34,151],[-38,147],[-38,145],[-36,137],[-32,134],[-32,128],[-34,118],[-22,114],[-16,122],[-14,126]],
+  // UK/Ireland rough
+  [[58,-5],[55,-6],[54,-6],[52,-4],[51,1],[53,1],[55,-2],[58,-5]],
+];
+
+function buildContinentPath(poly: [number, number][], lon0: number, R: number, cx: number, cy: number): string {
+  const segs: string[] = [];
+  let inSeg = false;
+  for (const [lat, lon] of poly) {
+    const { x, y, visible } = project(lat, lon, lon0, R, cx, cy);
+    if (visible) {
+      segs.push(`${inSeg ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`);
+      inSeg = true;
+    } else {
+      inSeg = false;
+    }
+  }
+  return segs.join('');
+}
+
 // Great-circle distance in degrees
 function gcDist(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const p1 = (lat1 * Math.PI) / 180;
@@ -89,22 +124,19 @@ function gcDist(lat1: number, lon1: number, lat2: number, lon2: number): number 
   return (Math.acos(Math.sin(p1) * Math.sin(p2) + Math.cos(p1) * Math.cos(p2) * Math.cos(dl)) * 180) / Math.PI;
 }
 
-type StatusLevel = 'ok' | 'warn' | 'error';
-interface ServiceStatus { name: string; status: StatusLevel; description?: string }
+type StatusLevel = 'ok' | 'warn' | 'error' | 'unknown';
 
 const STATUS_COLOR: Record<StatusLevel, string> = {
   ok: '#34d399',
   warn: '#fbbf24',
   error: '#f87171',
+  unknown: '#6b7280',
 };
 
 export const AWSStatusModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [lon0, setLon0] = useState(20);
   const animRef = useRef<number>(0);
   const lastTsRef = useRef<number>(0);
-
-  const [services, setServices] = useState<ServiceStatus[]>([]);
-  const [fetchState, setFetchState] = useState<'loading' | 'ok' | 'error'>('loading');
   const [hoveredRegion, setHoveredRegion] = useState<string | null>(null);
 
   // Globe animation
@@ -119,39 +151,7 @@ export const AWSStatusModal: React.FC<{ onClose: () => void }> = ({ onClose }) =
     return () => cancelAnimationFrame(animRef.current);
   }, []);
 
-  // Fetch AWS status
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await window.s3drive.shell.fetchAWSStatus();
-        if (!res.ok) throw new Error(res.error);
-        const data = JSON.parse(res.value) as {
-          current?: Array<{ service_name: string; status: number; description: string }>;
-        };
-        const current = data.current ?? [];
-        const list: ServiceStatus[] = current.map(e => ({
-          name: e.service_name,
-          status: e.status >= 3 ? 'error' : e.status >= 1 ? 'warn' : 'ok',
-          description: e.description,
-        }));
-        setServices(list);
-        setFetchState('ok');
-      } catch {
-        setFetchState('error');
-        setServices([]);
-      }
-    })();
-  }, []);
-
-  const getRegionStatus = (id: string): StatusLevel => {
-    if (fetchState !== 'ok') return 'ok';
-    const affected = services.filter(s =>
-      s.name.toLowerCase().includes(id.split('-').slice(0, 2).join('-'))
-    );
-    if (affected.some(s => s.status === 'error')) return 'error';
-    if (affected.some(s => s.status === 'warn')) return 'warn';
-    return 'ok';
-  };
+  const getRegionStatus = (_id: string): StatusLevel => 'unknown';
 
   // Globe geometry
   const R = 130;
@@ -179,9 +179,6 @@ export const AWSStatusModal: React.FC<{ onClose: () => void }> = ({ onClose }) =
     }
   }
 
-  const overallOk = services.every(s => s.status === 'ok');
-  const hasIssues = services.some(s => s.status !== 'ok');
-
   return (
     <motion.div
       className="modal-backdrop"
@@ -206,16 +203,12 @@ export const AWSStatusModal: React.FC<{ onClose: () => void }> = ({ onClose }) =
                 className="aws-title-dot"
                 animate={{ scale: [1, 1.5, 1], opacity: [1, 0.5, 1] }}
                 transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
-                style={{ background: fetchState === 'loading' ? '#fbbf24' : hasIssues ? '#f87171' : '#34d399' }}
+                style={{ background: '#6b7280' }}
               />
-              AWS SERVICE HEALTH
+              AWS REGION MAP
             </div>
             <div className="aws-modal-sub">
-              {fetchState === 'loading' && 'Fetching live status…'}
-              {fetchState === 'ok' && (hasIssues
-                ? `${services.filter(s => s.status !== 'ok').length} service(s) with issues`
-                : 'All systems operational')}
-              {fetchState === 'error' && 'Unable to fetch status — showing all green'}
+              Live status API unavailable · region locations only
             </div>
           </div>
           <motion.button
@@ -239,6 +232,13 @@ export const AWSStatusModal: React.FC<{ onClose: () => void }> = ({ onClose }) =
                   <stop offset="0%" stopColor="rgba(155,92,246,0.18)" />
                   <stop offset="100%" stopColor="rgba(9,7,20,0.95)" />
                 </radialGradient>
+                <filter id="edge-glow" x="-30%" y="-30%" width="160%" height="160%">
+                  <feGaussianBlur stdDeviation="1.8" result="blur" />
+                  <feMerge>
+                    <feMergeNode in="blur" />
+                    <feMergeNode in="SourceGraphic" />
+                  </feMerge>
+                </filter>
               </defs>
 
               {/* Globe base */}
@@ -261,19 +261,53 @@ export const AWSStatusModal: React.FC<{ onClose: () => void }> = ({ onClose }) =
                 })()}
               </g>
 
-              {/* Connection lines */}
+              {/* Continent outlines */}
               <g clipPath="url(#globe-clip)">
+                {CONTINENT_OUTLINES.map((poly, i) => {
+                  const d = buildContinentPath(poly, lon0, R, cx, cy);
+                  return d ? <path key={i} d={d} stroke="rgba(155,92,246,0.55)" strokeWidth="1" fill="rgba(155,92,246,0.07)" /> : null;
+                })}
+              </g>
+
+              {/* Data-flow connection lines — green glowing pulses */}
+              <g clipPath="url(#globe-clip)" filter="url(#edge-glow)">
                 {edges.map((e, i) => (
                   <motion.line
                     key={i}
                     x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2}
-                    stroke="rgba(155,92,246,0.3)"
-                    strokeWidth={0.8}
-                    strokeDasharray="3 4"
-                    animate={{ opacity: [0.2, 0.55, 0.2] }}
-                    transition={{ duration: 3 + i * 0.15, repeat: Infinity, ease: 'easeInOut', delay: (i * 0.2) % 3 }}
+                    stroke="#34d399"
+                    strokeWidth={1}
+                    strokeLinecap="round"
+                    animate={{ opacity: [0.05, 0.6, 0.05] }}
+                    transition={{
+                      duration: 1.4 + (i % 7) * 0.25,
+                      repeat: Infinity,
+                      ease: 'easeInOut',
+                      delay: (i * 0.17) % 2.2,
+                    }}
                   />
                 ))}
+              </g>
+              {/* Traveling dots along edges */}
+              <g clipPath="url(#globe-clip)">
+                {edges.filter((_, i) => i % 2 === 0).map((e, i) => {
+                  const mid = { x: (e.x1 + e.x2) / 2, y: (e.y1 + e.y2) / 2 };
+                  return (
+                    <motion.circle
+                      key={`dot-${i}`}
+                      cx={mid.x} cy={mid.y} r={1.5}
+                      fill="#34d399"
+                      style={{ filter: 'drop-shadow(0 0 3px #34d399)' }}
+                      animate={{ opacity: [0, 1, 0], scale: [0.5, 1.4, 0.5] }}
+                      transition={{
+                        duration: 1.4 + (i % 5) * 0.3,
+                        repeat: Infinity,
+                        ease: 'easeInOut',
+                        delay: (i * 0.23) % 2,
+                      }}
+                    />
+                  );
+                })}
               </g>
 
               {/* Globe border */}
@@ -310,12 +344,10 @@ export const AWSStatusModal: React.FC<{ onClose: () => void }> = ({ onClose }) =
                       transition={{ duration: 2.5 + Math.random() * 1, repeat: Infinity, ease: 'easeInOut' }}
                     />
                     {/* Dot */}
-                    <motion.circle
+                    <circle
                       cx={r.x} cy={r.y}
                       r={isHovered ? 5 : 3.5}
                       fill={col}
-                      animate={{ scale: r.status !== 'ok' ? [1, 1.3, 1] : 1 }}
-                      transition={{ duration: 1.2, repeat: Infinity }}
                       style={{ filter: `drop-shadow(0 0 4px ${col})` }}
                     />
                     {/* Label on hover */}
@@ -347,12 +379,14 @@ export const AWSStatusModal: React.FC<{ onClose: () => void }> = ({ onClose }) =
             </svg>
 
             <div className="aws-globe-legend">
-              {(['ok', 'warn', 'error'] as StatusLevel[]).map(s => (
-                <span key={s} className="aws-legend-item">
-                  <span className="aws-legend-dot" style={{ background: STATUS_COLOR[s] }} />
-                  {s === 'ok' ? 'Operational' : s === 'warn' ? 'Degraded' : 'Outage'}
-                </span>
-              ))}
+              <span className="aws-legend-item">
+                <span className="aws-legend-dot" style={{ background: '#6b7280' }} />
+                Region
+              </span>
+              <span className="aws-legend-item">
+                <span className="aws-legend-dot" style={{ background: '#34d399', boxShadow: '0 0 5px #34d399' }} />
+                Data flow
+              </span>
             </div>
           </div>
 
@@ -375,50 +409,25 @@ export const AWSStatusModal: React.FC<{ onClose: () => void }> = ({ onClose }) =
                     onMouseLeave={() => setHoveredRegion(null)}
                     style={{ opacity: isActive ? 1 : 0.5 }}
                   >
-                    <motion.span
-                      className="aws-region-dot"
-                      style={{ background: col }}
-                      animate={st !== 'ok' ? { scale: [1, 1.4, 1] } : {}}
-                      transition={{ duration: 1.2, repeat: Infinity }}
-                    />
+                    <span className="aws-region-dot" style={{ background: col }} />
                     <span className="aws-region-name">{r.name}</span>
                     <span className="aws-region-id">{r.id}</span>
-                    <span className="aws-region-status" style={{ color: col }}>
-                      {st === 'ok' ? '✓' : st === 'warn' ? '⚠' : '✕'}
-                    </span>
+                    <span className="aws-region-status" style={{ color: col }}>·</span>
                   </motion.div>
                 );
               })}
             </div>
 
             {/* Summary footer */}
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={fetchState + String(hasIssues)}
-                className="aws-status-summary"
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0 }}
-                style={{
-                  borderColor: fetchState === 'ok' && hasIssues ? '#f87171' : '#34d39940',
-                  background: fetchState === 'ok' && hasIssues ? '#f8717108' : '#34d39908',
-                }}
-              >
-                {fetchState === 'loading' && (
-                  <motion.span animate={{ opacity: [0.4, 1, 0.4] }} transition={{ duration: 1, repeat: Infinity }}>
-                    Checking AWS health dashboard…
-                  </motion.span>
-                )}
-                {fetchState === 'ok' && (
-                  overallOk || services.length === 0
-                    ? <><span style={{ color: '#34d399' }}>✓</span> All {REGIONS.length} regions operational</>
-                    : <><span style={{ color: '#f87171' }}>⚠</span> {services.filter(s => s.status !== 'ok').length} issue(s) detected</>
-                )}
-                {fetchState === 'error' && (
-                  <><span style={{ color: '#fbbf24' }}>⚡</span> Status check unavailable</>
-                )}
-              </motion.div>
-            </AnimatePresence>
+            <motion.div
+              className="aws-status-summary"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              style={{ borderColor: '#6b728040', background: '#6b728008' }}
+            >
+              <span style={{ color: '#6b7280' }}>ℹ</span>{' '}
+              AWS public status API discontinued · {REGIONS.length} regions shown
+            </motion.div>
           </div>
         </div>
       </motion.div>

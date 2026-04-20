@@ -1,116 +1,94 @@
-# S3Drive
-![S3Drive Logo](assets/logo.svg)
+<div align="center">
+  <img src="assets/logo.svg" alt="S3Drive" width="480" />
+  <br/>
+  <p><strong>A Google Drive-style desktop client for Amazon S3.</strong><br/>
+  Pay-as-you-go cloud storage with Drive-like UX and S3 economics.</p>
 
-S3Drive — a Google Drive alternative that runs on Amazon S3. A pay-as-you-go cloud drive with Drive-like UX and S3 economics: choose storage class per upload, share with pre-signed links, and only pay for what you store and transfer.
-
-Short description: Fast desktop client for S3-backed storage, ideal for teams and power users who want a Drive-style interface with transparent, per-object pricing and archive support.
-
----
-
-## 🚀 Quick Start (3 steps)
-
-1. **Clone & install**
-   ```bash
-   git clone <repo-url>
-   cd s3drive
-   npm install
-   ```
-
-2. **Configure AWS credentials**
-   ```bash
-   aws configure --profile s3drive
-   ```
-   Or set environment variables: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
-
-3. **Create an S3 bucket** (or use an existing one)
-   - Go to [AWS S3 Console](https://s3.console.aws.amazon.com)
-   - Click "Create bucket" and choose a name and region
-   - Launch S3Drive: `npm run dev`
-   - Enter your bucket name and region in Settings
-
-That's it! You now have a Google Drive-like interface for your S3 bucket.
+  ![License](https://img.shields.io/badge/license-MIT-green)
+  ![Version](https://img.shields.io/badge/version-0.1.0-blue)
+  ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+</div>
 
 ---
 
-## Why choose S3Drive — a pay-as-you-go Drive alternative
+## What is S3Drive?
 
-If you search for "Google Drive alternative" or "pay as you go cloud drive", S3Drive is built for that use case: Drive-style convenience with S3's cost model. It's an excellent fit when you want:
+S3Drive is a desktop app that gives you a Google Drive-style interface over any S3 bucket. Browse, upload, share, preview, and archive — all from a local client that stores credentials on your machine, not on any server.
 
-- Drive-like browsing, preview, and sharing UX
-- Full control of storage class (Standard, IA, Glacier, Deep Archive)
-- Pay-as-you-go billing (storage + requests + egress) instead of fixed per-user plans
-- A desktop client that keeps credentials local and uses pre-signed URLs for sharing
+**If you're looking for:** a "Google Drive alternative", "pay-as-you-go cloud drive", or "self-hosted cloud storage" — S3Drive is built for exactly that.
 
-S3Drive bridges the gap between consumer cloud drives and cloud-native storage economics.
+---
 
-## Feature set
+## Quick Start
 
-- **Browse** by prefix (S3 has no real folders; `/`-delimited keys are treated as folders)
-- **Upload** with per-upload storage class selection and progress bars
-- **Download** with archive-tier warnings (Glacier/Deep Archive need restore first)
-- **Preview** images and PDFs inline via short-lived pre-signed URLs
-- **Share** with pre-signed URLs (15 min → 7 days expiry)
-- **Versioning** — list all versions, download any, restore old versions, delete specific versions
-- **Archive restore** — initiate Glacier/Deep Archive restore with Bulk/Standard/Expedited tiers
-- **Search** across all objects in the bucket (client-side, capped at 500 matches for v1)
-- **Change storage class** of existing objects via copy-in-place
+### Option A — Download the installer (recommended)
 
-## Benefits & SEO keywords
+1. Grab the latest release for your platform from the [Releases](../../releases) page
+2. Install and launch S3Drive
+3. Click the **⚙ Settings** icon → enter your bucket name, region, and AWS credentials → **Save & connect**
 
-- **Google Drive alternative**: Drive-like UI, file previews, and sharing.
-- **Pay-as-you-go cloud drive**: pay for storage, requests, and egress only.
-- **S3-backed**: durability and regional redundancy of AWS S3.
-- **Archive support**: choose Glacier tiers for long-term savings.
-- **Privacy-conscious**: credentials remain local to the desktop; no central user data collection.
+That's it — no terminal, no config files required.
 
-## Prerequisites
+---
 
-1. **Node.js 20+** and npm
-2. **An AWS account** with an S3 bucket already created
-3. **AWS credentials** configured in `~/.aws/credentials` (see the IAM section below)
+### Option B — Run from source
 
-### Install
+**Prerequisites:** Node.js 20+ and npm
 
 ```bash
+# 1. Clone and install
+git clone <repo-url>
+cd s3drive
 npm install
-```
 
-### Dev
-
-```bash
+# 2. Start the dev server
 npm run dev
 ```
 
-Starts Vite for the renderer on `localhost:5173` and launches Electron once it's ready.
+On first launch, the Settings dialog opens automatically. Enter your bucket name, region, and AWS credentials — they're saved locally in your app data folder.
 
-### Build
+---
+
+## Setting up AWS credentials
+
+You have three ways to authenticate — enter whichever you prefer in the **Settings** dialog:
+
+### 1. Access Key ID + Secret (simplest)
+
+Enter your `Access Key ID` and `Secret Access Key` directly in the Settings form. They're stored in your app data folder (`%APPDATA%\S3Drive\config.json` on Windows, `~/.config/S3Drive/` on Linux, `~/Library/Application Support/S3Drive/` on macOS) — never sent anywhere else.
+
+To create a key pair:
+1. Open the [AWS IAM Console](https://console.aws.amazon.com/iam/) → **Users** → your user
+2. **Security credentials** tab → **Create access key**
+3. Copy the Access Key ID and Secret Access Key into S3Drive Settings
+
+### 2. Named AWS profile
+
+If you already use the AWS CLI, leave the key fields blank and enter a profile name (e.g. `default` or `work`). S3Drive reads `~/.aws/credentials`.
 
 ```bash
-npm run build          # compile main + renderer
-npm run package        # produce installer via electron-builder
+aws configure --profile s3drive
+# then enter "s3drive" in the Profile field in Settings
 ```
 
-## Credentials: how and where
+### 3. Environment variables
 
-**S3Drive does not collect your AWS access keys.** It uses the AWS SDK's default credential provider chain, which reads (in order):
+Set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` before launching. Leave all credential fields in Settings blank.
 
-1. Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
-2. `~/.aws/credentials` (optionally a named profile)
-3. EC2/ECS instance metadata (irrelevant on desktop)
+---
 
-To set up credentials:
+## Creating your S3 bucket
 
-```bash
-aws configure                       # default profile
-# or
-aws configure --profile s3drive     # named profile (then enter "s3drive" in Settings)
-```
+1. Go to the [AWS S3 Console](https://s3.console.aws.amazon.com) → **Create bucket**
+2. Choose a globally unique name and a region close to you
+3. Leave all other defaults (Block Public Access stays on — S3Drive uses pre-signed URLs for sharing, no public bucket required)
+4. Enter the bucket name and region in S3Drive Settings
 
-Only the **bucket name**, **region**, and **optional profile name** are stored by the app, in `~/Library/Application Support/S3Drive/config.json` (macOS) / `%APPDATA%/S3Drive/` (Windows) / `~/.config/S3Drive/` (Linux).
+---
 
 ## IAM policy
 
-The IAM user / role your credentials point to needs these permissions on the bucket. Replace `YOUR-BUCKET` with your bucket name.
+The credentials you provide need these S3 permissions. Replace `YOUR-BUCKET` with your bucket name.
 
 ```json
 {
@@ -146,55 +124,64 @@ The IAM user / role your credentials point to needs these permissions on the buc
 }
 ```
 
-If you plan to let end-users have their own IAM users (e.g. in a team deployment), scope `Resource` to `arn:aws:s3:::YOUR-BUCKET/${aws:username}/*` so each user only sees their own prefix.
+---
 
-## Architecture (visual)
+## Features
 
-![architecture diagram](assets/diagram.svg)
+| Feature | Details |
+|---|---|
+| **Browse** | Folder-like navigation over S3 key prefixes |
+| **Upload** | Per-file storage class selection, multipart progress |
+| **Download** | Archive-tier warnings; restore prompts for Glacier |
+| **Preview** | Images and PDFs inline via short-lived pre-signed URLs |
+| **Share** | Pre-signed links with configurable expiry (15 min → 7 days) |
+| **Versioning** | List, download, restore, or delete specific versions |
+| **Archive restore** | Glacier / Deep Archive restore with Bulk / Standard / Expedited tiers |
+| **Search** | Client-side search across all objects (capped at 500 matches) |
+| **Change storage class** | Move objects between tiers via copy-in-place |
+| **Multi-bucket** | Save and switch between multiple bucket configurations |
 
-This diagram highlights the desktop client → S3 → billing flow and the pay-as-you-go model.
+---
 
-## CORS
+## Storage class reference
 
-If you use the inline preview feature, S3 must allow your app to fetch presigned URLs. Electron's renderer uses `file://` origins, which S3 treats permissively for presigned GET requests — usually no CORS config is needed for this app's preview flow. If you hit issues, add a minimal CORS rule:
+| Class | Retrieval | Min billed | Best for |
+|---|---|---|---|
+| Standard | Instant | — | Active files |
+| Intelligent-Tiering | Instant | — | Unknown access patterns |
+| Standard-IA | Instant (fee) | 30 days | Backups, old projects |
+| One Zone-IA | Instant (fee) | 30 days | Re-creatable data |
+| Glacier Instant | Instant (higher fee) | 90 days | Quarterly archives |
+| Glacier Flexible | 1 min – 12 hr | 90 days | Compliance archives |
+| Deep Archive | 12 – 48 hr | 180 days | Cold compliance archives |
 
-```json
-[
-  {
-    "AllowedMethods": ["GET"],
-    "AllowedOrigins": ["*"],
-    "AllowedHeaders": ["*"],
-    "MaxAgeSeconds": 3000
-  }
-]
+> **Gotcha:** IA tiers have a 30-day minimum billing period per object, and objects under 128 KB are billed as 128 KB. For lots of small or short-lived files, Standard or Intelligent-Tiering is cheaper.
+
+---
+
+## Build for distribution
+
+### Automated releases (recommended)
+
+Push a version tag and GitHub Actions builds both installers automatically:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
-## Storage class quick reference
+A GitHub Release is created with:
+- `S3Drive-1.0.0.dmg` — macOS (universal: Intel + Apple Silicon)
+- `S3Drive Setup 1.0.0.exe` — Windows installer
 
-| Class | Retrieve | Min billed days | Best for |
-|---|---|---|---|
-| Standard | instant | 0 | Active work |
-| Intelligent-Tiering | instant | 0 | Unknown access patterns (good default) |
-| Standard-IA | instant (retrieval fee) | 30 | Backups, old projects |
-| One Zone-IA | instant (retrieval fee) | 30 | Re-creatable data |
-| Glacier Instant Retrieval | instant (higher retrieval fee) | 90 | Quarterly-access archives |
-| Glacier Flexible Retrieval | 1 min – 12 hr | 90 | Compliance archives |
-| Deep Archive | 12 – 48 hr | 180 | Cold compliance archives |
+### Local build
 
-**Gotchas:**
-- IA tiers bill a **minimum of 30 days** per object — uploading lots of small short-lived files to IA costs *more* than Standard
-- Small objects (<128 KB) in IA/Glacier still bill as if they were 128 KB — another reason Intelligent-Tiering is often the right default
-- `GLACIER` and `DEEP_ARCHIVE` objects **cannot be downloaded directly** — you must initiate a restore first (the app will nudge you to the Versions dialog where this lives)
+```bash
+npm run build      # compile TypeScript (main + renderer)
+npm run package    # produce installer via electron-builder → release/
+```
 
-## Versioning
-
-Click **"Enable versioning"** in the sidebar once per bucket. After that:
-
-- Every upload of an existing key creates a new version (the old one stays as a historical version)
-- Deletes create a **delete marker** (recoverable) instead of actually deleting
-- To truly purge, open **Versions** on a file and delete specific version IDs (including delete markers)
-
-Versioning has a cost: you pay for every version's storage. Pair it with a **lifecycle rule** in the AWS console to auto-expire old versions (e.g. "transition noncurrent versions to Glacier after 30 days, delete after 365") — this is not exposed in the app yet but is a good next feature.
+---
 
 ## Architecture
 
@@ -211,61 +198,46 @@ Versioning has a cost: you pay for every version's storage. Pair it with a **lif
                        │ ipcRenderer.invoke
 ┌──────────────────────▼───────────────────────────────────┐
 │  Main process (Electron)                                 │
-│  • ConfigStore — JSON in userData                        │
+│  • ConfigStore — JSON in userData (credentials included) │
 │  • S3Service — AWS SDK v3 wrapper                        │
 │    ├─ @aws-sdk/client-s3         (commands)              │
 │    ├─ @aws-sdk/lib-storage       (multipart upload)      │
 │    ├─ @aws-sdk/s3-request-presigner  (share URLs)        │
-│    └─ @aws-sdk/credential-providers   (~/.aws/credentials)│
+│    └─ @aws-sdk/credential-providers  (profile fallback)  │
 └──────────────────────────────────────────────────────────┘
 ```
 
-**Security posture:**
-- `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`
-- Renderer has zero Node / AWS SDK access — every S3 operation goes through the typed preload bridge
-- Credentials are loaded once in the main process and never cross the IPC boundary
-- Pre-signed URLs are generated in the main process and handed to the renderer as strings
+**Security:** `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`. Credentials are loaded once in the main process and never cross the IPC boundary. Pre-signed URLs are generated in main and passed to the renderer as opaque strings.
 
-## Known limitations / v2 ideas
-
-- **Search is client-side.** Good for thousands of objects, not for millions. For real scale, plug in S3 Inventory + Athena or OpenSearch.
-- **No folder sync daemon.** This is a browser, not a sync client. Adding a chokidar-based watcher on a local folder is maybe ~200 lines but significantly more state to get right.
-- **No drag-and-drop upload yet.** Trivial to add: listen for `ondrop` on the content pane, read `dataTransfer.files`, and pipe into the existing upload flow.
-- **No lifecycle-policy editor.** Would be a natural fit — let users set "auto-transition to Glacier after N days" from the UI instead of the AWS console.
-- **No multi-bucket switcher.** You'd configure multiple buckets and toggle between them in the titlebar. Straightforward extension of `ConfigStore`.
-- **No thumbnails.** Generating thumbnails at scale means either a Lambda on PUT or doing it client-side and storing under a `.thumbs/` prefix.
+---
 
 ## Project layout
 
 ```
 s3drive/
-├── package.json
-├── tsconfig.json              # renderer (ESM + JSX)
-├── tsconfig.main.json         # main + preload (CommonJS)
-├── vite.config.ts
-└── src/
-    ├── shared/
-    │   └── types.ts           # IPC contract + storage class catalog
-    ├── main/
-    │   ├── index.ts           # window + IPC handlers
-    │   ├── s3Service.ts       # AWS SDK wrapper
-    │   └── configStore.ts     # JSON config persistence
-    ├── preload/
-    │   ├── index.ts           # contextBridge surface
-    │   └── types.d.ts         # window.s3drive typing
-    └── renderer/
-        ├── index.html
-        ├── main.tsx
-        ├── App.tsx            # shell
-        ├── SettingsModal.tsx
-        ├── UploadModal.tsx
-        ├── ShareModal.tsx
-        ├── VersionsModal.tsx
-        ├── PreviewModal.tsx
-        ├── utils.ts
-        └── styles.css         # utility-brutalist design system
+├── assets/                    # logo, icons
+├── src/
+│   ├── shared/types.ts        # IPC contract + storage class catalog
+│   ├── main/
+│   │   ├── index.ts           # window creation + IPC handlers
+│   │   ├── s3Service.ts       # AWS SDK v3 wrapper
+│   │   └── configStore.ts     # multi-bucket JSON config (userData)
+│   ├── preload/
+│   │   ├── index.ts           # contextBridge surface
+│   │   └── types.d.ts         # window.s3drive typing
+│   └── renderer/
+│       ├── App.tsx            # shell + routing
+│       ├── SettingsModal.tsx  # bucket + credential management
+│       ├── UploadModal.tsx
+│       ├── ShareModal.tsx
+│       ├── VersionsModal.tsx
+│       ├── PreviewModal.tsx
+│       ├── AWSStatusModal.tsx # region map
+│       └── styles.css
 ```
+
+---
 
 ## License
 
-MIT
+MIT © Debajyoti

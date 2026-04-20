@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact_glob: 'release/*.dmg'
+            name: macOS
+          - os: windows-latest
+            artifact_glob: 'release/*.exe'
+            name: Windows
+
+    runs-on: ${{ matrix.os }}
+    name: Build · ${{ matrix.name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and package
+        run: npm run build && npx electron-builder --publish never
+        env:
+          # Prevents electron-builder from trying to auto-publish
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact_glob }}
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

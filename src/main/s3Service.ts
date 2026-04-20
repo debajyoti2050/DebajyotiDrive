@@ -54,11 +54,13 @@ export class S3Service {
     this.region = config.region;
     // Use explicit providers so the SDK never falls through to EC2 IMDS,
     // which hangs indefinitely on non-EC2 machines.
-    const credentials = config.profile
-      ? fromIni({ profile: config.profile })
-      : (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)
-        ? fromEnv()
-        : fromIni(); // reads ~/.aws/credentials default profile only
+    const credentials = (config.accessKeyId && config.secretAccessKey)
+      ? { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey }
+      : config.profile
+        ? fromIni({ profile: config.profile })
+        : (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)
+          ? fromEnv()
+          : fromIni(); // reads ~/.aws/credentials default profile only
     this.client = new S3Client({ region: config.region, credentials });
   }
 

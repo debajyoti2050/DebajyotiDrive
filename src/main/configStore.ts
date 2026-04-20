@@ -86,10 +86,10 @@ export class ConfigStore {
     return mc.buckets[index];
   }
 
-  /** Remove a bucket by index. Won't remove the last one. */
+  /** Remove a bucket by index. */
   remove(index: number): void {
     const mc = this.getAll();
-    if (!mc || mc.buckets.length <= 1) return;
+    if (!mc) return;
     mc.buckets.splice(index, 1);
     if (mc.activeIndex >= mc.buckets.length) {
       mc.activeIndex = mc.buckets.length - 1;

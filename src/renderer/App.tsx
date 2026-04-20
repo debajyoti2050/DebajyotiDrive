@@ -90,6 +90,9 @@ export const App: React.FC = () => {
   const [previewKey, setPreviewKey] = useState<string | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<{ key: string; storageClass: string } | null>(null);
 
+  // Tracks whether the last S3 call actually succeeded (used for status dot)
+  const [connectionOk, setConnectionOk] = useState(false);
+
   // Bucket-wide analytics (loaded async in background)
   const [bucketBytes, setBucketBytes] = useState<number | null>(null);
   const [bucketAnalytics, setBucketAnalytics] = useState<BucketAnalytics | null>(null);
@@ -166,13 +169,17 @@ export const App: React.FC = () => {
 
   // Fetch bucket analytics in the background whenever the active config changes
   useEffect(() => {
-    if (!config) return;
+    if (!config) { setConnectionOk(false); return; }
     setBucketBytes(null);
     setBucketAnalytics(null);
+    setConnectionOk(false);
     window.s3drive.s3.analytics().then(res => {
       if (res.ok) {
+        setConnectionOk(true);
         setBucketBytes(res.value.totalBytes);
         setBucketAnalytics(res.value);
+      } else {
+        setConnectionOk(false);
       }
     });
   }, [config]);
@@ -334,7 +341,13 @@ export const App: React.FC = () => {
     }
     setConfigs(prev => {
       const next = prev.filter((_, i) => i !== index);
-      setActiveIndex(idx => Math.min(idx, next.length - 1));
+      const newActive = Math.min(activeIndex, Math.max(0, next.length - 1));
+      setActiveIndex(newActive);
+      if (next.length === 0) {
+        setShowSettings(true);
+        setFolders([]);
+        setFiles([]);
+      }
       return next;
     });
     showToast('Bucket removed', 'info');
@@ -1431,8 +1444,8 @@ export const App: React.FC = () => {
         {/* Left: connection */}
         <span className="statusbar-left">
           <motion.span
-            className={`statusbar-dot ${config ? '' : 'disconnected'}`}
-            animate={config ? { opacity: [1, 0.3, 1], scale: [1, 1.5, 1] } : {}}
+            className={`statusbar-dot ${connectionOk ? '' : 'disconnected'}`}
+            animate={connectionOk ? { opacity: [1, 0.3, 1], scale: [1, 1.5, 1] } : {}}
             transition={{ duration: 2.4, repeat: Infinity, ease: 'easeInOut' }}
           />
           {config ? `${config.bucket} · ${config.region}` : 'Not connected'}
