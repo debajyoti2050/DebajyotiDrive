@@ -38,10 +38,21 @@ import {
 // Load .env from the project root (works in both dev and packaged app)
 loadEnv({ path: join(__dirname, '../../.env') });
 
-// Threshold above which we switch to multipart upload (5 MB chunks).
-// AWS allows multipart down to 5 MB parts; below that single PutObject is fine.
-const MULTIPART_THRESHOLD = 5 * 1024 * 1024;
-const PART_SIZE = 5 * 1024 * 1024;
+// S3 multipart limits: 5 MB min part, 5 GB max part, 10,000 max parts, 5 TB max object.
+const MIN_PART_SIZE  = 5   * 1024 * 1024;
+const MAX_PART_SIZE  = 5   * 1024 * 1024 * 1024;
+const MAX_PARTS      = 9_900; // leave headroom below S3's 10,000 limit
+const MAX_IN_FLIGHT  = 512  * 1024 * 1024; // cap concurrent data in memory (~512 MB)
+
+function partSizeFor(fileSize: number): number {
+  const needed = Math.ceil(fileSize / MAX_PARTS);
+  return Math.min(MAX_PART_SIZE, Math.max(MIN_PART_SIZE, needed));
+}
+
+function queueSizeFor(partSize: number): number {
+  // Keep concurrent in-flight data under MAX_IN_FLIGHT; at least 1, at most 4.
+  return Math.max(1, Math.min(4, Math.floor(MAX_IN_FLIGHT / partSize)));
+}
 
 export class S3Service {
   private client: S3Client;
@@ -173,8 +184,8 @@ export class S3Service {
 
     const uploader = new Upload({
       client: this.client,
-      partSize: PART_SIZE,
-      queueSize: stat.size >= MULTIPART_THRESHOLD ? 4 : 1,
+      partSize: partSizeFor(stat.size),
+      queueSize: queueSizeFor(partSizeFor(stat.size)),
       params: {
         Bucket: this.bucket,
         Key: req.key,
@@ -223,8 +234,8 @@ export class S3Service {
   ): Promise<void> {
     const uploader = new Upload({
       client: this.client,
-      partSize: PART_SIZE,
-      queueSize: size >= MULTIPART_THRESHOLD ? 4 : 1,
+      partSize: partSizeFor(size),
+      queueSize: queueSizeFor(partSizeFor(size)),
       params: { Bucket: this.bucket, Key: key, Body: body, StorageClass: storageClass }
     });
 
