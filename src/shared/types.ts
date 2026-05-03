@@ -131,6 +131,22 @@ export interface S3Object {
   isLatest?: boolean;
 }
 
+export interface PhotoLibraryItem {
+  id: string;
+  key: string;
+  url: string;
+  fileName: string;
+  type: 'photo' | 'video';
+  size: number;
+  createdAt: string;
+}
+
+export interface PhotoLibraryResult {
+  items: PhotoLibraryItem[];
+  prefix: string;
+  truncated: boolean;
+}
+
 export interface S3ObjectVersion {
   key: string;
   versionId: string;
@@ -169,6 +185,11 @@ export interface PickedUploadFile {
   name: string;
 }
 
+export interface PickedPhotoUploadFile extends PickedUploadFile {
+  key: string;
+  type: 'photo' | 'video';
+}
+
 export interface PickedFolderFile extends PickedUploadFile {
   relativePath: string;
 }
@@ -198,8 +219,11 @@ export interface TierStats {
   storageClass: string;
   count: number;
   totalBytes: number;
-  estimatedMonthlyCost: number; // USD, storage only, us-east-1 rates
+  estimatedMonthlyCost: number; // USD, storage only
+  pricePerGBMonth?: number;     // first-tier USD/GB-month rate used for display
 }
+
+export type PricingSource = 'aws-pricing-api' | 'static-fallback';
 
 export interface BucketAnalytics {
   totalObjects: number;
@@ -211,6 +235,9 @@ export interface BucketAnalytics {
   scannedAt: string;             // ISO
   capped: boolean;               // true if scan hit the 50k object limit
   region: string;                // region whose pricing was used
+  pricingSource: PricingSource;
+  pricingAsOf: string;
+  pricingError?: string;
 }
 
 // Result wrapper so the renderer can render errors instead of throwing.
@@ -230,4 +257,11 @@ export interface GDriveFile {
 export interface GDriveConfig {
   clientId: string;
   clientSecret: string;
+}
+
+export interface UpdateInfo {
+  hasUpdate: boolean;
+  latestVersion: string;
+  downloadUrl: string;
+  releaseNotes?: string;
 }

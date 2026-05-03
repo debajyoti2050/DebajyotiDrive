@@ -12,6 +12,7 @@ import {
   PutBucketVersioningCommand,
   GetBucketLocationCommand
 } from '@aws-sdk/client-s3';
+import { GetProductsCommand, PricingClient } from '@aws-sdk/client-pricing';
 import archiver from 'archiver';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -19,6 +20,7 @@ import { createReadStream, createWriteStream, statSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import type { Readable } from 'node:stream';
+import type { AwsCredentialIdentity, Provider } from '@aws-sdk/types';
 import { fromEnv, fromIni } from '@aws-sdk/credential-providers';
 import { config as loadEnv } from 'dotenv';
 import { join } from 'node:path';
@@ -26,6 +28,8 @@ import {
   AppConfig,
   BucketAnalytics,
   FolderInfo,
+  PhotoLibraryItem,
+  PhotoLibraryResult,
   RestoreRequest,
   S3Object,
   S3ObjectVersion,
@@ -59,6 +63,20 @@ interface LocalUploadRequest {
   storageClass: StorageClass;
 }
 
+type StoragePriceTier = {
+  beginRange: number;
+  endRange: number;
+  pricePerGBMonth: number;
+  description: string;
+};
+
+type StoragePricingCatalog = {
+  source: 'aws-pricing-api' | 'static-fallback';
+  asOf: string;
+  tiersByClass: Record<string, StoragePriceTier[]>;
+  error?: string;
+};
+
 function requireFolderPrefix(prefix: string): string {
   const normalized = String(prefix ?? '').replace(/\\/g, '/');
   if (!normalized || normalized === '/' || !normalized.endsWith('/')) {
@@ -67,25 +85,43 @@ function requireFolderPrefix(prefix: string): string {
   return normalized;
 }
 
+function normalizePhotoPrefix(prefix: string): string {
+  const normalized = String(prefix || 'debajyoti-photos/')
+    .replace(/^\/+/, '')
+    .replace(/\\/g, '/')
+    .replace(/\/{2,}/g, '/');
+  return normalized.endsWith('/') ? normalized : `${normalized}/`;
+}
+
+function isPhotoLibraryKey(key: string): boolean {
+  return /\.(jpe?g|png|webp|gif|heic|heif|mp4|mov|m4v|webm)$/i.test(key);
+}
+
+function photoTypeFromKey(key: string): 'photo' | 'video' {
+  return /\.(mp4|mov|m4v|webm)$/i.test(key) ? 'video' : 'photo';
+}
+
 export class S3Service {
   private client: S3Client;
+  private credentials: AwsCredentialIdentity | Provider<AwsCredentialIdentity>;
   private bucket: string;
   private region: string;
   private activeUploads = new Map<string, Upload>();
+  private static pricingCache = new Map<string, { expiresAt: number; catalog: StoragePricingCatalog }>();
 
   constructor(config: AppConfig) {
     this.bucket = config.bucket;
     this.region = config.region;
     // Use explicit providers so the SDK never falls through to EC2 IMDS,
     // which hangs indefinitely on non-EC2 machines.
-    const credentials = (config.accessKeyId && config.secretAccessKey)
+    this.credentials = (config.accessKeyId && config.secretAccessKey)
       ? { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey }
       : config.profile
         ? fromIni({ profile: config.profile })
         : (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)
           ? fromEnv()
           : fromIni(); // reads ~/.aws/credentials default profile only
-    this.client = new S3Client({ region: config.region, credentials });
+    this.client = new S3Client({ region: config.region, credentials: this.credentials });
   }
 
   /**
@@ -181,6 +217,59 @@ export class S3Service {
     } while (continuationToken && matches.length < 500); // hard cap
 
     return matches;
+  }
+
+  async listPhotos(prefix = 'debajyoti-photos/', maxItems = 160): Promise<PhotoLibraryResult> {
+    const normalizedPrefix = normalizePhotoPrefix(prefix);
+    const items: S3Object[] = [];
+    let continuationToken: string | undefined;
+    let truncated = false;
+
+    do {
+      const res = await this.client.send(new ListObjectsV2Command({
+        Bucket: this.bucket,
+        Prefix: normalizedPrefix,
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }));
+
+      for (const obj of res.Contents ?? []) {
+        if (!obj.Key || obj.Key.endsWith('/') || !isPhotoLibraryKey(obj.Key)) continue;
+        items.push({
+          key: obj.Key,
+          size: obj.Size ?? 0,
+          lastModified: (obj.LastModified ?? new Date()).toISOString(),
+          storageClass: obj.StorageClass ?? 'STANDARD',
+          etag: obj.ETag,
+        });
+      }
+
+      truncated = Boolean(res.IsTruncated);
+      continuationToken = res.IsTruncated && items.length < maxItems ? res.NextContinuationToken : undefined;
+    } while (continuationToken);
+
+    const sorted = items
+      .sort((a, b) => b.lastModified.localeCompare(a.lastModified))
+      .slice(0, maxItems);
+
+    const photoItems: PhotoLibraryItem[] = await Promise.all(sorted.map(async item => {
+      const url = await this.presign(item.key, 300);
+      return {
+        id: item.key,
+        key: item.key,
+        url,
+        fileName: item.key.split('/').pop() || item.key,
+        type: photoTypeFromKey(item.key),
+        size: item.size,
+        createdAt: item.lastModified,
+      };
+    }));
+
+    return {
+      items: photoItems,
+      prefix: normalizedPrefix,
+      truncated,
+    };
   }
 
   /**
@@ -303,6 +392,54 @@ export class S3Service {
       }));
     }
     return keys.length;
+  }
+
+  /** Download specific S3 keys (by exact key) into a single zip file. */
+  async downloadKeysAsZip(
+    keys: string[],
+    destPath: string,
+    onProgress: (p: UploadProgress) => void,
+    jobKey: string
+  ): Promise<void> {
+    const arc = archiver('zip', { zlib: { level: 5 } });
+    const output = createWriteStream(destPath);
+    const closed = new Promise<void>((res, rej) => {
+      output.on('close', res);
+      output.on('error', rej);
+      arc.on('error', rej);
+    });
+    arc.pipe(output);
+
+    let loadedBytes = 0;
+    let totalBytes = 0;
+
+    for (const key of keys) {
+      const getRes = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+      if (!getRes.Body) continue;
+      totalBytes += getRes.ContentLength ?? 0;
+
+      const fileName = key.split('/').pop() || key.replace(/\//g, '_');
+      const body = getRes.Body as Readable;
+
+      const tracker = new Transform({
+        transform(chunk: Buffer, _enc, cb) {
+          loadedBytes += chunk.length;
+          onProgress({ key: jobKey, loaded: loadedBytes, total: Math.max(totalBytes, loadedBytes), done: false });
+          cb(null, chunk);
+        }
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        tracker.on('end', resolve);
+        tracker.on('error', reject);
+        arc.append(tracker, { name: fileName });
+        body.pipe(tracker);
+      });
+    }
+
+    await arc.finalize();
+    await closed;
+    onProgress({ key: jobKey, loaded: totalBytes || loadedBytes, total: totalBytes || loadedBytes, done: true });
   }
 
   /** Stream all objects under the given prefixes into a single zip file. */
@@ -520,31 +657,156 @@ export class S3Service {
     }));
   }
 
-  // Storage cost per GB/month in USD by region (AWS list prices, storage only).
-  private static readonly REGION_COST_PER_GB: Record<string, Record<string, number>> = {
-    'us-east-1':    { STANDARD: 0.023,  INTELLIGENT_TIERING: 0.023,  STANDARD_IA: 0.0125, ONEZONE_IA: 0.01,  GLACIER_IR: 0.004,  GLACIER: 0.0036, DEEP_ARCHIVE: 0.00099 },
-    'us-east-2':    { STANDARD: 0.023,  INTELLIGENT_TIERING: 0.023,  STANDARD_IA: 0.0125, ONEZONE_IA: 0.01,  GLACIER_IR: 0.004,  GLACIER: 0.0036, DEEP_ARCHIVE: 0.00099 },
-    'us-west-1':    { STANDARD: 0.026,  INTELLIGENT_TIERING: 0.026,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
-    'us-west-2':    { STANDARD: 0.023,  INTELLIGENT_TIERING: 0.023,  STANDARD_IA: 0.0125, ONEZONE_IA: 0.01,  GLACIER_IR: 0.004,  GLACIER: 0.0036, DEEP_ARCHIVE: 0.00099 },
-    'eu-west-1':    { STANDARD: 0.023,  INTELLIGENT_TIERING: 0.023,  STANDARD_IA: 0.0125, ONEZONE_IA: 0.01,  GLACIER_IR: 0.004,  GLACIER: 0.0036, DEEP_ARCHIVE: 0.00099 },
-    'eu-west-2':    { STANDARD: 0.024,  INTELLIGENT_TIERING: 0.024,  STANDARD_IA: 0.013,  ONEZONE_IA: 0.0104,GLACIER_IR: 0.0042, GLACIER: 0.0038, DEEP_ARCHIVE: 0.0011  },
-    'eu-central-1': { STANDARD: 0.0245, INTELLIGENT_TIERING: 0.0245, STANDARD_IA: 0.013,  ONEZONE_IA: 0.01,  GLACIER_IR: 0.0044, GLACIER: 0.0039, DEEP_ARCHIVE: 0.00099 },
-    'ap-south-1':   { STANDARD: 0.025,  INTELLIGENT_TIERING: 0.025,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
-    'ap-south-2':   { STANDARD: 0.025,  INTELLIGENT_TIERING: 0.025,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
-    'ap-southeast-1':{ STANDARD: 0.025, INTELLIGENT_TIERING: 0.025,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
-    'ap-southeast-2':{ STANDARD: 0.025, INTELLIGENT_TIERING: 0.025,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
-    'ap-northeast-1':{ STANDARD: 0.025, INTELLIGENT_TIERING: 0.025,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
-    'ap-northeast-2':{ STANDARD: 0.025, INTELLIGENT_TIERING: 0.025,  STANDARD_IA: 0.0138, ONEZONE_IA: 0.011, GLACIER_IR: 0.0045, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
-    'ca-central-1': { STANDARD: 0.024,  INTELLIGENT_TIERING: 0.024,  STANDARD_IA: 0.013,  ONEZONE_IA: 0.0104,GLACIER_IR: 0.0042, GLACIER: 0.0038, DEEP_ARCHIVE: 0.00099 },
-    'sa-east-1':    { STANDARD: 0.0405, INTELLIGENT_TIERING: 0.0405, STANDARD_IA: 0.0225, ONEZONE_IA: 0.018, GLACIER_IR: 0.0073, GLACIER: 0.0066, DEEP_ARCHIVE: 0.0018  },
-    'me-south-1':   { STANDARD: 0.0252, INTELLIGENT_TIERING: 0.0252, STANDARD_IA: 0.014,  ONEZONE_IA: 0.011, GLACIER_IR: 0.0046, GLACIER: 0.004,  DEEP_ARCHIVE: 0.0011  },
-    'af-south-1':   { STANDARD: 0.0275, INTELLIGENT_TIERING: 0.0275, STANDARD_IA: 0.0152, ONEZONE_IA: 0.012, GLACIER_IR: 0.005,  GLACIER: 0.0045, DEEP_ARCHIVE: 0.0012  },
+  // Last-resort storage prices. Analytics prefers live AWS Price List API data.
+  private static readonly FALLBACK_COST_PER_GB: Record<string, number> = {
+    STANDARD: 0.023,
+    INTELLIGENT_TIERING: 0.023,
+    STANDARD_IA: 0.0125,
+    ONEZONE_IA: 0.01,
+    GLACIER_IR: 0.004,
+    GLACIER: 0.0036,
+    DEEP_ARCHIVE: 0.00099
   };
 
-  private costPerGB(sc: string): number {
-    const table = S3Service.REGION_COST_PER_GB[this.region]
-      ?? S3Service.REGION_COST_PER_GB['us-east-1'];
-    return table[sc] ?? 0.023;
+  private static fallbackPricing(error?: string): StoragePricingCatalog {
+    const tiersByClass: Record<string, StoragePriceTier[]> = {};
+    for (const [storageClass, pricePerGBMonth] of Object.entries(S3Service.FALLBACK_COST_PER_GB)) {
+      tiersByClass[storageClass] = [{
+        beginRange: 0,
+        endRange: Number.POSITIVE_INFINITY,
+        pricePerGBMonth,
+        description: 'Static fallback S3 storage estimate'
+      }];
+    }
+    return {
+      source: 'static-fallback',
+      asOf: new Date().toISOString(),
+      tiersByClass,
+      error
+    };
+  }
+
+  private classifyStorageProduct(attrs: Record<string, string>, descriptions: string[]): StorageClass | null {
+    const text = [
+      attrs.storageClass,
+      attrs.usagetype,
+      attrs.operation,
+      attrs.volumeType,
+      ...descriptions
+    ].join(' ').toLowerCase();
+
+    if (text.includes('deep archive') || text.includes('timedstorage-gda')) return 'DEEP_ARCHIVE';
+    if (text.includes('glacier instant') || text.includes('timedstorage-gir')) return 'GLACIER_IR';
+    if (text.includes('glacier') || text.includes('timedstorage-glacier')) return 'GLACIER';
+    if (text.includes('one zone') || text.includes('timedstorage-zia')) return 'ONEZONE_IA';
+    if (text.includes('standard - infrequent') || text.includes('standard-infrequent') || text.includes('timedstorage-sia')) return 'STANDARD_IA';
+    if (text.includes('intelligent-tiering') && (text.includes('frequent access') || text.includes('int-fa'))) return 'INTELLIGENT_TIERING';
+    if (
+      text.includes('general purpose')
+      || text.includes('s3 standard storage')
+      || text.includes('timedstorage-bytehrs')
+    ) return 'STANDARD';
+    return null;
+  }
+
+  private getPricingTiersFromProduct(rawProduct: string): { storageClass: StorageClass; tiers: StoragePriceTier[] } | null {
+    const parsed = JSON.parse(rawProduct);
+    const product = parsed.product;
+    const attrs = product?.attributes ?? {};
+    const onDemand = parsed.terms?.OnDemand ?? {};
+    const dimensions = Object.values(onDemand)
+      .flatMap((term: any) => Object.values(term.priceDimensions ?? {}) as any[]);
+
+    const gbMonthDimensions = dimensions.filter((dim: any) =>
+      String(dim.unit).toLowerCase() === 'gb-mo'
+      && Number(dim.pricePerUnit?.USD) >= 0
+      && !String(dim.description ?? '').toLowerCase().includes('metadata')
+      && !String(dim.description ?? '').toLowerCase().includes('monitoring')
+    );
+    if (!gbMonthDimensions.length) return null;
+
+    const storageClass = this.classifyStorageProduct(attrs, gbMonthDimensions.map((dim: any) => String(dim.description ?? '')));
+    if (!storageClass) return null;
+
+    const tiers = gbMonthDimensions
+      .map((dim: any): StoragePriceTier => ({
+        beginRange: Number(dim.beginRange ?? 0),
+        endRange: dim.endRange === 'Inf' ? Number.POSITIVE_INFINITY : Number(dim.endRange ?? Number.POSITIVE_INFINITY),
+        pricePerGBMonth: Number(dim.pricePerUnit.USD),
+        description: String(dim.description ?? '')
+      }))
+      .filter(tier => Number.isFinite(tier.beginRange) && tier.pricePerGBMonth > 0)
+      .sort((a, b) => a.beginRange - b.beginRange);
+
+    return tiers.length ? { storageClass, tiers } : null;
+  }
+
+  private async getStoragePricing(): Promise<StoragePricingCatalog> {
+    const cached = S3Service.pricingCache.get(this.region);
+    if (cached && cached.expiresAt > Date.now()) return cached.catalog;
+
+    try {
+      const pricing = new PricingClient({
+        region: 'us-east-1',
+        credentials: this.credentials
+      });
+      const tiersByClass: Record<string, StoragePriceTier[]> = {};
+      let nextToken: string | undefined;
+
+      do {
+        const res = await pricing.send(new GetProductsCommand({
+          ServiceCode: 'AmazonS3',
+          Filters: [
+            { Type: 'TERM_MATCH', Field: 'regionCode', Value: this.region },
+            { Type: 'TERM_MATCH', Field: 'productFamily', Value: 'Storage' }
+          ],
+          MaxResults: 100,
+          NextToken: nextToken
+        }));
+
+        for (const priceListItem of res.PriceList ?? []) {
+          const product = this.getPricingTiersFromProduct(String(priceListItem));
+          if (!product) continue;
+          const current = tiersByClass[product.storageClass] ?? [];
+          tiersByClass[product.storageClass] = [...current, ...product.tiers]
+            .sort((a, b) => a.beginRange - b.beginRange);
+        }
+        nextToken = res.NextToken;
+      } while (nextToken);
+
+      if (!Object.keys(tiersByClass).length) {
+        throw new Error(`AWS Pricing API returned no S3 storage prices for ${this.region}.`);
+      }
+
+      const catalog: StoragePricingCatalog = {
+        source: 'aws-pricing-api',
+        asOf: new Date().toISOString(),
+        tiersByClass
+      };
+      S3Service.pricingCache.set(this.region, {
+        expiresAt: Date.now() + 12 * 60 * 60 * 1000,
+        catalog
+      });
+      return catalog;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return S3Service.fallbackPricing(message);
+    }
+  }
+
+  private monthlyStorageCost(bytes: number, tiers: StoragePriceTier[] | undefined): number {
+    const gb = bytes / 1024 ** 3;
+    const priceTiers = tiers?.length ? tiers : S3Service.fallbackPricing().tiersByClass.STANDARD;
+    let total = 0;
+
+    for (const tier of priceTiers) {
+      const endRange = Number.isFinite(tier.endRange) ? tier.endRange : Number.POSITIVE_INFINITY;
+      const billableGb = Math.max(0, Math.min(gb, endRange) - tier.beginRange);
+      if (billableGb > 0) total += billableGb * tier.pricePerGBMonth;
+      if (gb <= endRange) break;
+    }
+
+    return total;
   }
 
   async getAnalytics(): Promise<BucketAnalytics> {
@@ -580,12 +842,15 @@ export class S3Service {
       token = res.IsTruncated ? res.NextContinuationToken : undefined;
     } while (token && all.length < CAP);
 
+    const pricing = await this.getStoragePricing();
+
     const byTier: TierStats[] = Array.from(tierMap.entries())
       .map(([sc, s]) => ({
         storageClass: sc,
         count: s.count,
         totalBytes: s.bytes,
-        estimatedMonthlyCost: (s.bytes / 1024 ** 3) * this.costPerGB(sc)
+        estimatedMonthlyCost: this.monthlyStorageCost(s.bytes, pricing.tiersByClass[sc]),
+        pricePerGBMonth: pricing.tiersByClass[sc]?.[0]?.pricePerGBMonth
       }))
       .sort((a, b) => b.totalBytes - a.totalBytes);
 
@@ -606,7 +871,10 @@ export class S3Service {
       recentFiles,
       scannedAt: new Date().toISOString(),
       capped: all.length >= CAP,
-      region: this.region
+      region: this.region,
+      pricingSource: pricing.source,
+      pricingAsOf: pricing.asOf,
+      pricingError: pricing.error
     };
   }
 

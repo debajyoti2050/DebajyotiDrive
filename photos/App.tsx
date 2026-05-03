@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import * as ImagePicker from 'expo-image-picker';
 import { Image as ExpoImage } from 'expo-image';
@@ -7,6 +7,8 @@ import { Ionicons } from '@expo/vector-icons';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
   FlatList,
   Platform,
   Pressable,
@@ -110,6 +112,20 @@ export default function App() {
   const [jobs, setJobs] = useState<UploadJob[]>([]);
   const [apiOnline, setApiOnline] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
+  const ambientMotion = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(ambientMotion, {
+        toValue: 1,
+        duration: 18000,
+        easing: Easing.inOut(Easing.sin),
+        useNativeDriver: Platform.OS !== 'web',
+      })
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [ambientMotion]);
 
   const loadLibrary = useCallback(async () => {
     setRefreshing(true);
@@ -201,14 +217,18 @@ export default function App() {
     <SafeAreaView style={styles.safe}>
       <StatusBar style="light" />
       <LinearGradient colors={['#071011', '#101820', '#171411']} style={styles.screen}>
+        <AnimatedBackdrop motion={ambientMotion} />
         <View style={styles.header}>
           <View style={styles.headerTitle}>
-            <Text style={styles.brand}>Debajyoti Photos</Text>
+            <Text style={styles.brand} numberOfLines={1}>Debajyoti Photos</Text>
             <Text style={styles.subtitle}>{apiOnline ? `${items.length} items synced · ${compactBytes(totalBytes)}` : 'Sync unavailable'}</Text>
           </View>
-          <Pressable style={styles.syncPill} onPress={loadLibrary}>
-            {refreshing ? <ActivityIndicator color="#f8efe3" size="small" /> : <Ionicons name="cloud-done-outline" size={18} color="#f8efe3" />}
-          </Pressable>
+          <View style={styles.headerActions}>
+            <PoweredByAwsBadge />
+            <Pressable style={styles.syncPill} onPress={loadLibrary}>
+              {refreshing ? <ActivityIndicator color="#f8efe3" size="small" /> : <Ionicons name="cloud-done-outline" size={18} color="#f8efe3" />}
+            </Pressable>
+          </View>
         </View>
 
         <View style={styles.searchShell}>
@@ -302,6 +322,43 @@ export default function App() {
   );
 }
 
+function AnimatedBackdrop({ motion }: { motion: Animated.Value }) {
+  const slowX = motion.interpolate({ inputRange: [0, 0.5, 1], outputRange: [-36, 24, -36] });
+  const slowY = motion.interpolate({ inputRange: [0, 0.5, 1], outputRange: [8, -30, 8] });
+  const fastX = motion.interpolate({ inputRange: [0, 0.5, 1], outputRange: [32, -28, 32] });
+  const rotateA = motion.interpolate({ inputRange: [0, 0.5, 1], outputRange: ['-10deg', '8deg', '-10deg'] });
+  const rotateB = motion.interpolate({ inputRange: [0, 0.5, 1], outputRange: ['14deg', '-12deg', '14deg'] });
+  const scaleA = motion.interpolate({ inputRange: [0, 0.5, 1], outputRange: [1, 1.12, 1] });
+  const pulse = motion.interpolate({ inputRange: [0, 0.45, 1], outputRange: [0.18, 0.46, 0.18] });
+
+  return (
+    <View pointerEvents="none" style={styles.ambientLayer}>
+      <Animated.View style={[styles.ambientHalo, styles.ambientHaloWarm, { opacity: pulse, transform: [{ translateX: slowX }, { translateY: slowY }, { scale: scaleA }] }]} />
+      <Animated.View style={[styles.ambientHalo, styles.ambientHaloCool, { transform: [{ translateX: fastX }, { rotate: rotateA }] }]} />
+      <Animated.View style={[styles.depthPanel, styles.depthPanelOne, { transform: [{ translateX: slowX }, { rotate: rotateA }] }]} />
+      <Animated.View style={[styles.depthPanel, styles.depthPanelTwo, { transform: [{ translateX: fastX }, { rotate: rotateB }] }]} />
+      <Animated.View style={[styles.depthCube, { transform: [{ translateX: slowX }, { translateY: slowY }, { rotate: rotateB }] }]} />
+      <Animated.View style={[styles.energyBeam, styles.energyBeamTop, { transform: [{ translateX: fastX }, { rotate: '-10deg' }] }]} />
+      <Animated.View style={[styles.energyBeam, styles.energyBeamBottom, { transform: [{ translateX: slowX }, { rotate: '9deg' }] }]} />
+    </View>
+  );
+}
+
+function PoweredByAwsBadge() {
+  return (
+    <View style={styles.awsBadge}>
+      <Text style={styles.awsBadgePrefix}>Powered by</Text>
+      <View style={styles.awsMark}>
+        <Text style={styles.awsWord}>aws</Text>
+        <View style={styles.awsSmile}>
+          <View style={styles.awsSmileLine} />
+          <View style={styles.awsSmileArrow} />
+        </View>
+      </View>
+    </View>
+  );
+}
+
 function SegmentButton({ active, icon, label, onPress }: { active: boolean; icon: keyof typeof Ionicons.glyphMap; label: string; onPress: () => void }) {
   return (
     <Pressable style={[styles.segmentButton, active && styles.segmentButtonActive]} onPress={onPress}>
@@ -367,6 +424,75 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 18,
     paddingTop: 12,
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  ambientLayer: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: 'hidden',
+  },
+  ambientHalo: {
+    position: 'absolute',
+    borderRadius: 999,
+  },
+  ambientHaloWarm: {
+    width: 360,
+    height: 360,
+    right: -120,
+    top: 20,
+    backgroundColor: 'rgba(246,179,93,0.28)',
+  },
+  ambientHaloCool: {
+    width: 320,
+    height: 220,
+    left: -110,
+    bottom: 180,
+    backgroundColor: 'rgba(77,166,255,0.18)',
+  },
+  depthPanel: {
+    position: 'absolute',
+    borderWidth: 1,
+    borderRadius: 8,
+    borderColor: 'rgba(246,179,93,0.22)',
+    backgroundColor: 'rgba(248,239,227,0.035)',
+  },
+  depthPanelOne: {
+    width: 230,
+    height: 142,
+    right: -32,
+    top: 118,
+  },
+  depthPanelTwo: {
+    width: 160,
+    height: 106,
+    left: -22,
+    top: 280,
+    borderColor: 'rgba(77,166,255,0.2)',
+  },
+  depthCube: {
+    position: 'absolute',
+    right: 32,
+    top: 292,
+    width: 72,
+    height: 72,
+    borderWidth: 1,
+    borderColor: 'rgba(246,179,93,0.46)',
+    backgroundColor: 'rgba(246,179,93,0.045)',
+  },
+  energyBeam: {
+    position: 'absolute',
+    width: 260,
+    height: 2,
+    backgroundColor: 'rgba(246,179,93,0.42)',
+  },
+  energyBeamTop: {
+    top: 164,
+    left: -80,
+  },
+  energyBeamBottom: {
+    bottom: 142,
+    right: -70,
+    backgroundColor: 'rgba(77,166,255,0.28)',
   },
   header: {
     minHeight: 52,
@@ -374,6 +500,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 12,
+    zIndex: 1,
   },
   headerTitle: {
     flex: 1,
@@ -388,6 +515,71 @@ const styles = StyleSheet.create({
     color: '#a7b0aa',
     fontSize: 13,
     marginTop: 2,
+  },
+  headerActions: {
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+  awsBadge: {
+    minHeight: 30,
+    minWidth: 116,
+    borderRadius: 8,
+    paddingHorizontal: 9,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255,246,230,0.94)',
+    borderWidth: 1,
+    borderColor: 'rgba(246,179,93,0.44)',
+  },
+  awsBadgePrefix: {
+    color: 'rgba(16,24,32,0.66)',
+    fontSize: 8,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.7,
+  },
+  awsMark: {
+    width: 38,
+    height: 23,
+    position: 'relative',
+    justifyContent: 'flex-start',
+  },
+  awsWord: {
+    color: '#232f3e',
+    fontSize: 19,
+    lineHeight: 20,
+    fontWeight: '900',
+    letterSpacing: -1.1,
+  },
+  awsSmile: {
+    position: 'absolute',
+    left: 9,
+    right: 1,
+    bottom: 0,
+    height: 8,
+  },
+  awsSmileLine: {
+    position: 'absolute',
+    left: 0,
+    right: 5,
+    bottom: 3,
+    height: 2,
+    borderRadius: 2,
+    backgroundColor: '#ff9900',
+    transform: [{ rotate: '-8deg' }],
+  },
+  awsSmileArrow: {
+    position: 'absolute',
+    right: 0,
+    bottom: 1,
+    width: 7,
+    height: 7,
+    borderRightWidth: 2,
+    borderBottomWidth: 2,
+    borderColor: '#ff9900',
+    transform: [{ rotate: '-18deg' }],
   },
   syncPill: {
     width: 44,
@@ -410,6 +602,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(248,239,227,0.08)',
     borderWidth: 1,
     borderColor: 'rgba(248,239,227,0.1)',
+    zIndex: 1,
   },
   searchInput: {
     flex: 1,
@@ -423,6 +616,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     overflow: 'hidden',
     backgroundColor: '#1c2524',
+    zIndex: 1,
   },
   heroImage: {
     ...StyleSheet.absoluteFillObject,
@@ -457,6 +651,7 @@ const styles = StyleSheet.create({
     marginTop: 14,
     flexDirection: 'row',
     gap: 8,
+    zIndex: 1,
   },
   segmentButton: {
     flex: 1,
@@ -491,6 +686,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 138, 122, 0.11)',
     borderWidth: 1,
     borderColor: 'rgba(255, 138, 122, 0.22)',
+    zIndex: 1,
   },
   errorText: {
     flex: 1,
@@ -500,6 +696,7 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     marginTop: 10,
+    zIndex: 1,
   },
   loadingState: {
     flex: 1,
@@ -664,5 +861,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.25,
     shadowRadius: 18,
     elevation: 8,
+    zIndex: 2,
   },
 });

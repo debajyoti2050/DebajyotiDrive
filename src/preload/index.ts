@@ -6,6 +6,8 @@ import type {
   FolderInfo,
   GDriveConfig,
   GDriveFile,
+  PhotoLibraryResult,
+  PickedPhotoUploadFile,
   PickedFolderFile,
   PickedUploadFile,
   PublicAppConfig,
@@ -15,6 +17,7 @@ import type {
   S3Object,
   S3ObjectVersion,
   StorageClass,
+  UpdateInfo,
   UploadRequest,
   UploadProgress
 } from '../shared/types';
@@ -98,11 +101,35 @@ const api = {
       return ipcRenderer.invoke('dialog:registerDroppedFiles', paths);
     },
   },
+  photos: {
+    list: (): Promise<Result<PhotoLibraryResult>> =>
+      ipcRenderer.invoke('photos:list'),
+    pickMedia: (): Promise<Result<PickedPhotoUploadFile[]>> =>
+      ipcRenderer.invoke('photos:pickMedia'),
+    registerDroppedMedia: (files: File[]): Promise<Result<PickedPhotoUploadFile[]>> => {
+      const paths = Array.from(files)
+        .map(file => {
+          try { return webUtils.getPathForFile(file); }
+          catch { return ''; }
+        })
+        .filter((path): path is string => Boolean(path));
+      return ipcRenderer.invoke('photos:registerDroppedMedia', paths);
+    },
+    upload: (args: { uploadId: string }): Promise<Result<{ key: string }>> =>
+      ipcRenderer.invoke('photos:upload', args),
+    downloadZip: (args: { keys: string[]; jobKey: string }): Promise<Result<string | null>> =>
+      ipcRenderer.invoke('photos:downloadZip', args),
+  },
   shell: {
     openExternal: (url: string): Promise<Result<true>> =>
       ipcRenderer.invoke('shell:openExternal', url),
     fetchAWSStatus: (): Promise<Result<string>> =>
       ipcRenderer.invoke('shell:fetchAWSStatus'),
+  },
+  app: {
+    version: (): Promise<Result<string>> => ipcRenderer.invoke('app:version'),
+    checkUpdate: (): Promise<Result<UpdateInfo>> => ipcRenderer.invoke('app:checkUpdate'),
+    downloadAndInstall: (): Promise<Result<true>> => ipcRenderer.invoke('app:downloadAndInstall'),
   },
   gdrive: {
     init: (cfg: GDriveConfig): Promise<Result<true>> =>

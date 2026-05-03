@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import type { AppConfig, BucketAnalytics, FolderInfo, PickedUploadFile, PublicAppConfig, S3Object, StorageClass, UploadProgress } from '@shared/types';
+import type { AppConfig, BucketAnalytics, FolderInfo, PickedUploadFile, PublicAppConfig, S3Object, StorageClass, UpdateInfo, UploadProgress } from '@shared/types';
 import { STORAGE_CLASSES } from '@shared/types';
 import { Logo } from './Logo';
 import { AuroraBackground } from './AuroraBackground';
+import { CloudStorageModel } from './CloudStorageModel';
+import { PhotosLibraryView } from './PhotosLibraryView';
 import {
   BarChartIcon, CloudUploadIcon, FolderIcon, FolderPlusIcon,
-  GoogleDriveIcon, GridIcon, HistoryIcon, HomeIcon, ListIcon,
+  GoogleDriveIcon, GridIcon, HistoryIcon, HomeIcon, ImageIcon, ListIcon,
   MoonIcon, MonitorIcon, SunIcon,
   getTileIcon, isPreviewable,
 } from './Icons';
@@ -52,6 +54,7 @@ export const App: React.FC = () => {
   const [activeIndex, setActiveIndex] = useState(0);
   const [configLoaded, setConfigLoaded] = useState(false);
   const config = configs[activeIndex] ?? null;
+  const [activeSurface, setActiveSurface] = useState<'drive' | 'photos'>('drive');
 
   // Navigation state
   const [prefix, setPrefix] = useState('');
@@ -124,6 +127,7 @@ export const App: React.FC = () => {
   const cancelledUploadRunsRef = useRef<Set<string>>(new Set());
   const [downloadJobs, setDownloadJobs] = useState<UploadJob[]>([]);
 
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [toast, setToast] = useState<Toast>(null);
   const showToast = useCallback((msg: string, kind: 'info' | 'error' | 'success' = 'info') => {
     setToast({ msg, kind });
@@ -133,8 +137,13 @@ export const App: React.FC = () => {
   // Boot
   useEffect(() => {
     (async () => {
-      if (typeof window.s3drive.config.getAll === 'function') {
-        const res = await window.s3drive.config.getAll();
+      const api = window.s3drive;
+      if (!api) {
+        setConfigLoaded(true);
+        return;
+      }
+      if (typeof api.config.getAll === 'function') {
+        const res = await api.config.getAll();
         setConfigLoaded(true);
         if (res.ok && res.value && res.value.buckets.length > 0) {
           setConfigs(res.value.buckets);
@@ -143,7 +152,7 @@ export const App: React.FC = () => {
           setShowSettings(true);
         }
       } else {
-        const res = await window.s3drive.config.get();
+        const res = await api.config.get();
         setConfigLoaded(true);
         if (res.ok && res.value) {
           setConfigs([res.value]);
@@ -155,9 +164,20 @@ export const App: React.FC = () => {
     })();
   }, []);
 
+  // Check for updates on startup
+  useEffect(() => {
+    const check = window.s3drive?.app?.checkUpdate;
+    if (!check) return;
+    check().then(res => {
+      if (res.ok && res.value.hasUpdate) setUpdateInfo(res.value);
+    }).catch(() => {});
+  }, []);
+
   // Upload progress
   useEffect(() => {
-    const off = window.s3drive.s3.onUploadProgress((p: UploadProgress) => {
+    const onUploadProgress = window.s3drive?.s3?.onUploadProgress;
+    if (!onUploadProgress) return;
+    const off = onUploadProgress((p: UploadProgress) => {
       const now = Date.now();
       setUploadJobs(prev => prev.map(j => {
         if (j.key !== p.key || j.queued) return j;
@@ -170,7 +190,7 @@ export const App: React.FC = () => {
 
   // Fetch bucket analytics in the background whenever the active config changes
   useEffect(() => {
-    if (!config) { setConnectionOk(false); return; }
+    if (!config || !window.s3drive?.s3) { setConnectionOk(false); return; }
     setBucketBytes(null);
     setBucketAnalytics(null);
     setConnectionOk(false);
@@ -209,7 +229,7 @@ export const App: React.FC = () => {
 
   // Presign image/video URLs when tiles view is active
   useEffect(() => {
-    if (viewMode !== 'tiles' || !config) return;
+    if (viewMode !== 'tiles' || !config || !window.s3drive?.s3) return;
     const currentFiles = searchResults ?? files;
     const toSign = currentFiles
       .filter(f => (isPreviewable(f.key, 'image') || isPreviewable(f.key, 'video')) && !tileUrls[f.key])
@@ -227,7 +247,9 @@ export const App: React.FC = () => {
 
   // Download progress
   useEffect(() => {
-    const off = window.s3drive.s3.onDownloadProgress((p: UploadProgress) => {
+    const onDownloadProgress = window.s3drive?.s3?.onDownloadProgress;
+    if (!onDownloadProgress) return;
+    const off = onDownloadProgress((p: UploadProgress) => {
       const now = Date.now();
       setDownloadJobs(prev => prev.map(j => {
         if (j.key !== p.key) return j;
@@ -286,6 +308,7 @@ export const App: React.FC = () => {
 
   // Standalone navigate that properly pushes history (avoids stale closure in navigateToFolder)
   const navigate = (fp: string) => {
+    setActiveSurface('drive');
     setSearchQuery('');
     setSearchResults(null);
     setSelectedFolders(new Set());
@@ -661,18 +684,58 @@ export const App: React.FC = () => {
               {config.profile && ` · ${config.profile}`}
             </div>
           ) : null}
+          {/* Update available badge */}
+          {updateInfo && (
+            <motion.button
+              className="update-badge"
+              onClick={() => window.s3drive.shell.openExternal(updateInfo.downloadUrl)}
+              title={updateInfo.releaseNotes ? `What's new:\n${updateInfo.releaseNotes}` : `Download v${updateInfo.latestVersion}`}
+              initial={{ opacity: 0, scale: 0.85 }}
+              animate={{ opacity: [0.85, 1, 0.85], scale: 1 }}
+              transition={{ opacity: { duration: 2.2, repeat: Infinity }, scale: { duration: 0.3 } }}
+              whileHover={{ scale: 1.06 }}
+              whileTap={{ scale: 0.94 }}
+            >
+              ↑ v{updateInfo.latestVersion} available
+            </motion.button>
+          )}
+
           {/* Powered by AWS badge */}
           <motion.div
             className="powered-by-aws"
             initial={{ opacity: 0, x: 10 }}
             animate={{ opacity: 1, x: 0 }}
+            whileHover={{ y: -1, scale: 1.03 }}
+            whileTap={{ scale: 0.98 }}
             transition={{ delay: 0.4, duration: 0.4 }}
+            title="Powered by Amazon Web Services"
           >
             <span className="pba-text">Powered by</span>
-            <svg width="26" height="16" viewBox="0 0 80 32" fill="none" className="pba-logo">
-              <path d="M22.5 14c0 1.1-.9 2-2 2h-6c-1.1 0-2-.9-2-2v-4c0-1.1.9-2 2-2h6c1.1 0 2 .9 2 2v4z" fill="#FF9900"/>
-              <path d="M35 8h-6c-1.1 0-2 .9-2 2v6h10V10c0-1.1-.9-2-2-2z" fill="#FF9900" opacity="0.8"/>
-              <path d="M5 22c9.9 4.5 21.2 6.8 33 6.8 9.1 0 19.3-1.9 28.5-5.6.4-.2.5-.7.1-.9-.4-.2-.9-.1-1.3.1C56 26.6 46.8 28 38 28 26.3 28 15 25.5 5.8 20.8c-.4-.2-.9 0-1 .4-.1.4.2.8.2.8z" fill="#FF9900"/>
+            <svg width="44" height="23" viewBox="0 0 88 46" fill="none" className="pba-logo" role="img" aria-label="AWS">
+              <text
+                x="5"
+                y="27"
+                fill="currentColor"
+                fontFamily="Arial, Helvetica, sans-serif"
+                fontSize="26"
+                fontWeight="700"
+                letterSpacing="-1.4"
+              >
+                aws
+              </text>
+              <path
+                d="M22 34.2c13.6 7.1 31.7 6.1 44.5-2.3"
+                stroke="#ff9900"
+                strokeWidth="3"
+                strokeLinecap="round"
+              />
+              <path
+                d="M61.8 29.6l8.1-.2-3.5 7.2"
+                stroke="#ff9900"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
             </svg>
           </motion.div>
 
@@ -704,6 +767,8 @@ export const App: React.FC = () => {
           animate={{ opacity: 1, x: 0 }}
           transition={{ duration: 0.45, ease: [0.25, 0.46, 0.45, 0.94] }}
         >
+          {activeSurface === 'drive' ? (
+            <>
           <div className="sidebar-section">
             {/* Upload — pulsing beacon */}
             <motion.button
@@ -777,19 +842,31 @@ export const App: React.FC = () => {
               {STORAGE_CLASSES.map(sc => <option key={sc.id} value={sc.id}>{sc.label}</option>)}
             </select>
           </div>
+            </>
+          ) : (
+            <div className="sidebar-section photos-sidebar-mode">
+              <div className="sidebar-label">Photos mode</div>
+              <div className="photos-sidebar-card">
+                <ImageIcon size={18} />
+                <strong>Media-only workspace</strong>
+                <span>Photos uploads are locked to Standard tier.</span>
+              </div>
+            </div>
+          )}
 
           <div className="sidebar-section">
             <div className="sidebar-label">Bucket</div>
             {[
-              { label: 'Analytics', icon: <BarChartIcon size={14} />, action: () => setShowDashboard(true), iconAnim: { y: [0, -3, 0] as number[] } },
-              { label: 'Root / Home', icon: <HomeIcon size={14} />, action: () => navigate(''), iconAnim: { scale: [1, 1.2, 1] as number[] } },
-              { label: 'Enable versioning', icon: <HistoryIcon size={14} />, action: enableVersioning, iconAnim: { rotate: [0, -360] as number[] } },
-            ].map(({ label, icon, action, iconAnim }) => (
+              { label: 'Analytics', icon: <BarChartIcon size={14} />, action: () => setShowDashboard(true), iconAnim: { y: [0, -3, 0] as number[] }, requiresConfig: true, driveOnly: true },
+              { label: 'Root / Home', icon: <HomeIcon size={14} />, action: () => navigate(''), iconAnim: { scale: [1, 1.2, 1] as number[] }, requiresConfig: true },
+              { label: 'Photos', icon: <ImageIcon size={14} />, action: () => setActiveSurface('photos'), iconAnim: { scale: [1, 1.16, 1] as number[] }, requiresConfig: false },
+              { label: 'Enable versioning', icon: <HistoryIcon size={14} />, action: enableVersioning, iconAnim: { rotate: [0, -360] as number[] }, requiresConfig: true, driveOnly: true },
+            ].map(({ label, icon, action, iconAnim, requiresConfig, driveOnly }) => (
               <motion.button
                 key={label}
-                className="sidebar-button"
+                className={`sidebar-button${label === 'Photos' && activeSurface === 'photos' ? ' active' : ''}`}
                 onClick={action}
-                disabled={!config}
+                disabled={(requiresConfig && !config) || (Boolean(driveOnly) && activeSurface === 'photos')}
                 variants={sidebarBtnVariants}
                 initial="rest" whileHover="hover" whileTap="tap"
                 transition={{ type: 'spring', damping: 18, stiffness: 320 }}
@@ -802,6 +879,7 @@ export const App: React.FC = () => {
             ))}
           </div>
 
+          {activeSurface === 'drive' && (
           <div className="sidebar-section" style={{ marginTop: 'auto' }}>
             <div className="sidebar-label">Storage tiers</div>
             <div style={{ fontSize: 11, color: 'var(--text-faint)', lineHeight: 1.7 }}>
@@ -817,6 +895,7 @@ export const App: React.FC = () => {
               ))}
             </div>
           </div>
+          )}
         </motion.aside>
 
         <main
@@ -834,7 +913,37 @@ export const App: React.FC = () => {
         >
           {/* Continuous aurora background */}
           <AuroraBackground />
+          <div className="kinetic-backdrop" aria-hidden>
+            <motion.div
+              className="kinetic-grid"
+              animate={{ backgroundPosition: ['0px 0px', '56px 56px'], opacity: [0.18, 0.36, 0.18] }}
+              transition={{
+                backgroundPosition: { duration: 18, repeat: Infinity, ease: 'linear' },
+                opacity: { duration: 7, repeat: Infinity, ease: 'easeInOut' },
+              }}
+            />
+            <motion.div
+              className="kinetic-scanline"
+              animate={{ y: ['-18%', '118%'], opacity: [0, 0.65, 0] }}
+              transition={{ duration: 8, repeat: Infinity, ease: 'easeInOut' }}
+            />
+            {activeSurface === 'drive' && <CloudStorageModel />}
+            <motion.div
+              className="kinetic-beam kinetic-beam-a"
+              animate={{ x: ['-12%', '112%'], opacity: [0, 0.5, 0] }}
+              transition={{ duration: 9, repeat: Infinity, ease: 'easeInOut', delay: 0.8 }}
+            />
+            <motion.div
+              className="kinetic-beam kinetic-beam-b"
+              animate={{ x: ['112%', '-12%'], opacity: [0, 0.45, 0] }}
+              transition={{ duration: 11, repeat: Infinity, ease: 'easeInOut', delay: 2.5 }}
+            />
+          </div>
 
+          {activeSurface === 'photos' ? (
+            <PhotosLibraryView connected={Boolean(config)} onToast={showToast} />
+          ) : (
+            <>
           {/* ── Sneak-peek analytics strip ───────────────────────────────── */}
           <AnimatePresence>
             {bucketAnalytics && (
@@ -959,7 +1068,13 @@ export const App: React.FC = () => {
           )}
 
           {/* Navigation bar — breadcrumb + back/forward */}
-          <div className="nav-bar" style={{ position: 'relative', zIndex: 1 }}>
+          <motion.div
+            className="nav-bar"
+            style={{ position: 'relative', zIndex: 1 }}
+            initial={{ opacity: 0, y: -10, scale: 0.995 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ duration: 0.42, ease: [0.25, 0.46, 0.45, 0.94] }}
+          >
             <div className="nav-arrows">
               {[{ label: '←', action: goBack, disabled: !canGoBack || showingSearch, title: 'Go back' },
                 { label: '→', action: goForward, disabled: !canGoForward || showingSearch, title: 'Go forward' }
@@ -1042,7 +1157,7 @@ export const App: React.FC = () => {
                 </motion.button>
               ))}
             </div>
-          </div>
+          </motion.div>
 
           {/* Drop hint overlay */}
           <AnimatePresence>
@@ -1068,20 +1183,20 @@ export const App: React.FC = () => {
             )}
           </AnimatePresence>
 
-          {/* Ambient nebula orbs — subtle background depth */}
+          {/* Layered atmospheric glows for depth */}
           {config && (
-            <div className="content-orbs" aria-hidden>
+            <div className="content-glows" aria-hidden>
               {[
                 { left: '15%', top: '30%', dur: 18, delay: 0 },
                 { left: '55%', top: '55%', dur: 24, delay: 5 },
                 { left: '78%', top: '18%', dur: 20, delay: 10 },
-              ].map((orb, i) => (
+              ].map((glow, i) => (
                 <motion.div
                   key={i}
-                  className="content-orb"
-                  style={{ left: orb.left, top: orb.top }}
+                  className="content-glow"
+                  style={{ left: glow.left, top: glow.top }}
                   animate={{ opacity: [0.15, 0.35, 0.15], scale: [1, 1.18, 0.92, 1.08, 1] }}
-                  transition={{ duration: orb.dur, repeat: Infinity, ease: 'easeInOut', delay: orb.delay }}
+                  transition={{ duration: glow.dur, repeat: Infinity, ease: 'easeInOut', delay: glow.delay }}
                 />
               ))}
             </div>
@@ -1492,6 +1607,8 @@ export const App: React.FC = () => {
               </motion.div>
             )}
           </AnimatePresence>
+            </>
+          )}
         </main>
       </div>
 

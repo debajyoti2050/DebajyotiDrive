@@ -3,7 +3,15 @@
   "version": "0.1.0",
   "description": "A Drive-like desktop client for Amazon S3 with per-upload storage class control",
   "main": "dist/main/index.js",
-  "author": "Debajyoti",
+  "author": {
+    "name": "Debajyoti",
+    "email": "debajyoti0007@gmail.com",
+    "url": "https://github.com/debajyoti2050"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/debajyoti2050/DebajyotiDrive"
+  },
   "license": "MIT",
   "scripts": {
     "dev": "npm run build:main && concurrently -k \"npm:dev:renderer\" \"npm:dev:watch\" \"npm:dev:electron\"",
@@ -18,6 +26,7 @@
     "lint": "eslint src --ext .ts,.tsx"
   },
   "dependencies": {
+    "@aws-sdk/client-pricing": "^3.1041.0",
     "@aws-sdk/client-s3": "^3.658.0",
     "@aws-sdk/credential-providers": "^3.658.0",
     "@aws-sdk/lib-storage": "^3.658.0",
@@ -28,7 +37,8 @@
     "dotenv": "^17.4.2",
     "framer-motion": "^12.38.0",
     "googleapis": "^171.4.0",
-    "mime-types": "^2.1.35"
+    "mime-types": "^2.1.35",
+    "three": "^0.184.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",
@@ -38,6 +48,7 @@
     "@types/node": "^20.16.5",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
+    "@types/three": "^0.184.0",
     "@vitejs/plugin-react": "^6.0.1",
     "autoprefixer": "^10.5.0",
     "concurrently": "^9.0.1",
@@ -79,7 +90,18 @@
     },
     "win": {
       "target": "nsis",
-      "icon": "assets/icon.ico"
+      "icon": "assets/icon.ico",
+      "publisherName": "Debajyoti"
+    },
+    "nsis": {
+      "installerName": "Debajyoti Drive Setup",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Debajyoti Drive",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     },
     "linux": {
       "target": "AppImage"

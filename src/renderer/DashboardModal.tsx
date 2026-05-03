@@ -23,6 +23,16 @@ function formatUSD(usd: number): string {
   return `$${usd.toFixed(2)}`;
 }
 
+function formatUSDPerGB(value?: number): string {
+  if (value === undefined) return 'rate unavailable';
+  if (value < 0.0001) return '< $0.0001/GB-mo';
+  return `$${value.toFixed(5).replace(/0+$/, '').replace(/\.$/, '')}/GB-mo`;
+}
+
+function pricingSourceLabel(source: BucketAnalytics['pricingSource']): string {
+  return source === 'aws-pricing-api' ? 'AWS Pricing API live rates' : 'static fallback rates';
+}
+
 function tierColor(sc: string): string {
   const t = STORAGE_CLASSES.find(c => c.id === sc)?.costTier ?? 1;
   return `var(--tier-${t})`;
@@ -379,7 +389,10 @@ function TierRow({ t, maxBytes, delay = 0 }: { t: TierStats; maxBytes: number; d
       <div className="dash-tier-meta">
         <span>{formatBytes(t.totalBytes)}</span>
         <span className="dash-tier-count">{t.count.toLocaleString()} obj</span>
-        <span className="dash-tier-cost" title={formatUSD(t.estimatedMonthlyCost) + '/mo'}>
+        <span
+          className="dash-tier-cost"
+          title={`${formatUSD(t.estimatedMonthlyCost)}/mo · ${formatUSDPerGB(t.pricePerGBMonth)}`}
+        >
           {formatINR(t.estimatedMonthlyCost)}/mo
         </span>
       </div>
@@ -594,7 +607,7 @@ export const DashboardModal: React.FC<Props> = ({ onClose, onToast }) => {
                     label="Est. monthly cost"
                     rawValue={data.estimatedMonthlyCost}
                     formatFn={n => formatINR(n)}
-                    sub={`${formatUSD(data.estimatedMonthlyCost)} · ${data.region}`}
+                    sub={`${formatUSD(data.estimatedMonthlyCost)} · ${pricingSourceLabel(data.pricingSource)}`}
                     delay={0.16}
                   />
                   <StatCard
@@ -703,7 +716,8 @@ export const DashboardModal: React.FC<Props> = ({ onClose, onToast }) => {
                   animate={{ opacity: 1 }}
                   transition={{ delay: 0.5 }}
                 >
-                  Prices in ₹ (1 USD = ₹{USD_TO_INR}) · {data.region} storage rates · storage cost only, excludes requests &amp; data transfer
+                  Prices in ₹ (1 USD = ₹{USD_TO_INR}) · {data.region} · {pricingSourceLabel(data.pricingSource)} · storage only, excludes requests &amp; data transfer
+                  {data.pricingError && ` · pricing fallback reason: ${data.pricingError}`}
                 </motion.div>
 
                 {/* bottom tables */}

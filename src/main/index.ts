@@ -13,7 +13,9 @@ import type {
   BucketAnalytics,
   GDriveConfig,
   GDriveFile,
+  PhotoLibraryResult,
   PickedFolderFile,
+  PickedPhotoUploadFile,
   PickedUploadFile,
   PublicAppConfig,
   PublicMultiConfig,
@@ -22,6 +24,7 @@ import type {
   S3Object,
   S3ObjectVersion,
   StorageClass,
+  UpdateInfo,
   UploadRequest,
   UploadProgress
 } from '@shared/types';
@@ -30,8 +33,9 @@ let mainWindow: BrowserWindow | null = null;
 let s3: S3Service | null = null;
 const configStore = new ConfigStore();
 let gdrive: GoogleDriveService | null = null;
-const pendingUploads = new Map<string, { localPath: string; selectedAt: number }>();
+const pendingUploads = new Map<string, { localPath: string; selectedAt: number; photoKey?: string }>();
 const UPLOAD_TOKEN_TTL_MS = 30 * 60 * 1000;
+const PHOTO_MEDIA_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif', 'mp4', 'mov', 'm4v', 'webm'];
 
 function gdriveConfigPath() { return join(app.getPath('userData'), 'gdrive-config.json'); }
 
@@ -49,12 +53,65 @@ function registerUploadFile(localPath: string, displayName?: string): PickedUplo
   return { id, name: (displayName || basename(localPath) || 'file').replace(/\\/g, '/') };
 }
 
+function photoPrefix(): string {
+  const normalized = String(process.env.PHOTOS_S3_PREFIX || 'debajyoti-photos/')
+    .replace(/^\/+/, '')
+    .replace(/\\/g, '/')
+    .replace(/\/{2,}/g, '/');
+  return normalized.endsWith('/') ? normalized : `${normalized}/`;
+}
+
+function isPhotoMediaPath(localPath: string): boolean {
+  const ext = basename(localPath).split('.').pop()?.toLowerCase() || '';
+  return PHOTO_MEDIA_EXTENSIONS.includes(ext);
+}
+
+function photoUploadType(localPath: string): 'photo' | 'video' {
+  const ext = basename(localPath).split('.').pop()?.toLowerCase() || '';
+  return ['mp4', 'mov', 'm4v', 'webm'].includes(ext) ? 'video' : 'photo';
+}
+
+function safePhotoFileName(localPath: string): string {
+  const name = basename(localPath) || 'media';
+  return name
+    .replace(/[<>:"|?*\x00-\x1f]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\.+/, '') || `media-${Date.now()}`;
+}
+
+function photoObjectKey(localPath: string): string {
+  const now = new Date();
+  const year = String(now.getFullYear());
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  const suffix = randomUUID().slice(0, 8);
+  return `${photoPrefix()}${year}/${month}/${day}/${Date.now()}-${suffix}-${safePhotoFileName(localPath)}`;
+}
+
+function registerPhotoUploadFile(localPath: string): PickedPhotoUploadFile | null {
+  if (!isPhotoMediaPath(localPath)) return null;
+  prunePendingUploads();
+  const id = randomUUID();
+  const key = photoObjectKey(localPath);
+  pendingUploads.set(id, { localPath, selectedAt: Date.now(), photoKey: key });
+  return { id, key, name: safePhotoFileName(localPath), type: photoUploadType(localPath) };
+}
+
 function consumeUploadPath(uploadId: string): string {
   prunePendingUploads();
   const entry = pendingUploads.get(uploadId);
   if (!entry) throw new Error('Upload selection expired. Pick the file again.');
   pendingUploads.delete(uploadId);
   return entry.localPath;
+}
+
+function consumePhotoUpload(uploadId: string): { localPath: string; key: string } {
+  prunePendingUploads();
+  const entry = pendingUploads.get(uploadId);
+  if (!entry || !entry.photoKey) throw new Error('Photo upload selection expired. Pick the media again.');
+  pendingUploads.delete(uploadId);
+  return { localPath: entry.localPath, key: entry.photoKey };
 }
 
 function collectFolderUploadFiles(folderPath: string): { folderName: string; files: PickedFolderFile[] } {
@@ -77,6 +134,94 @@ function collectFolderUploadFiles(folderPath: string): { folderName: string; fil
 
   walk(folderPath, '');
   return { folderName, files };
+}
+
+function collectDroppedPhotoUploads(paths: string[]): PickedPhotoUploadFile[] {
+  const picked: PickedPhotoUploadFile[] = [];
+  const seen = new Set<string>();
+
+  function addPath(rawPath: string): void {
+    const localPath = rawPath.trim();
+    if (!localPath || seen.has(localPath)) return;
+    seen.add(localPath);
+    const st = lstatSync(localPath);
+    if (st.isSymbolicLink()) return;
+    if (st.isDirectory()) {
+      for (const entry of readdirSync(localPath)) addPath(join(localPath, entry));
+    } else if (st.isFile()) {
+      const registered = registerPhotoUploadFile(localPath);
+      if (registered) picked.push(registered);
+    }
+  }
+
+  for (const rawPath of paths) if (typeof rawPath === 'string') addPath(rawPath);
+  return picked;
+}
+
+const GITHUB_REPO = 'debajyoti2050/DebajyotiDrive';
+
+async function fetchLatestRelease(): Promise<Record<string, unknown> | null> {
+  return new Promise((resolve) => {
+    const req = nodeHttps.get(
+      `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
+      { headers: { 'User-Agent': 'DebajyotiDrive-UpdateCheck', 'Accept': 'application/vnd.github.v3+json' } },
+      (res) => {
+        if ((res.statusCode ?? 0) >= 400) { resolve(null); return; }
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8'))); }
+          catch { resolve(null); }
+        });
+        res.on('error', () => resolve(null));
+      }
+    );
+    req.on('error', () => resolve(null));
+    req.setTimeout(10_000, () => { req.destroy(); resolve(null); });
+  });
+}
+
+async function autoCheckAndPromptUpdate(): Promise<void> {
+  const current = app.getVersion();
+  const data = await fetchLatestRelease();
+  if (!data) return;
+
+  const latestVersion = String(data.tag_name || '').replace(/^v/, '');
+  if (!latestVersion || compareVersions(latestVersion, current) <= 0) return;
+
+  if (!mainWindow) return;
+  const releaseNotes = String(data.body || '').slice(0, 300) || undefined;
+  const detail = releaseNotes
+    ? `You're on v${current}.\n\nWhat's new:\n${releaseNotes}`
+    : `You're on v${current}. Download and install the latest version now?`;
+
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: 'Update Available',
+    message: `Debajyoti Drive v${latestVersion} is available`,
+    detail,
+    buttons: ['Download & Install', 'Remind Me Later'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+
+  if (response !== 0) return;
+
+  const assets = (data.assets as Array<{ name: string; browser_download_url: string }>) ?? [];
+  const platformExt = process.platform === 'win32' ? '.exe' : process.platform === 'darwin' ? '.dmg' : '.AppImage';
+  const asset = assets.find(a => a.name.endsWith(platformExt));
+  const downloadUrl = asset?.browser_download_url ?? `https://github.com/${GITHUB_REPO}/releases/latest`;
+  await shell.openExternal(downloadUrl);
+}
+
+function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
 }
 
 function requireObjectKey(key: string): string {
@@ -191,6 +336,10 @@ app.whenReady().then(() => {
   registerIpcHandlers();
   createWindow();
 
+  mainWindow?.webContents.once('did-finish-load', () => {
+    setTimeout(() => autoCheckAndPromptUpdate().catch(() => {}), 3000);
+  });
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -256,6 +405,63 @@ function registerIpcHandlers() {
   ipcMain.handle('s3:search', async (_e, query: string) =>
     safe(async () => requireS3().search(query))
   );
+
+  ipcMain.handle('photos:list', async (): Promise<Result<PhotoLibraryResult>> =>
+    safe(async () => requireS3().listPhotos(process.env.PHOTOS_S3_PREFIX || 'debajyoti-photos/'))
+  );
+
+  ipcMain.handle('photos:pickMedia', async (): Promise<Result<PickedPhotoUploadFile[]>> => safe(async () => {
+    mainWindow?.focus();
+    const res = await dialog.showOpenDialog(mainWindow!, {
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: 'Photos and Videos', extensions: PHOTO_MEDIA_EXTENSIONS },
+        { name: 'All files', extensions: ['*'] }
+      ]
+    });
+    if (res.canceled) return [];
+    return res.filePaths
+      .map(path => registerPhotoUploadFile(path))
+      .filter((file): file is PickedPhotoUploadFile => Boolean(file));
+  }));
+
+  ipcMain.handle('photos:registerDroppedMedia', async (
+    _e,
+    paths: string[]
+  ): Promise<Result<PickedPhotoUploadFile[]>> => safe(async () =>
+    Array.isArray(paths) ? collectDroppedPhotoUploads(paths) : []
+  ));
+
+  ipcMain.handle('photos:upload', async (
+    _e,
+    args: { uploadId: string }
+  ): Promise<Result<{ key: string }>> => safe(async () => {
+    const service = requireS3();
+    const { localPath, key } = consumePhotoUpload(args.uploadId);
+    await service.upload({
+      localPath,
+      key,
+      storageClass: 'STANDARD'
+    }, (p: UploadProgress) => {
+      mainWindow?.webContents.send('s3:uploadProgress', p);
+    });
+    return { key };
+  }));
+
+  ipcMain.handle('photos:downloadZip', async (
+    _e,
+    args: { keys: string[]; jobKey: string }
+  ) => safe(async () => {
+    const res = await dialog.showSaveDialog(mainWindow!, {
+      defaultPath: `photos-${new Date().toISOString().slice(0, 10)}.zip`,
+      filters: [{ name: 'ZIP Archive', extensions: ['zip'] }]
+    });
+    if (res.canceled || !res.filePath) return null;
+    await requireS3().downloadKeysAsZip(args.keys, res.filePath, (p) => {
+      mainWindow?.webContents.send('s3:downloadProgress', p);
+    }, args.jobKey);
+    return res.filePath;
+  }));
 
   // ===== Upload =====
   ipcMain.handle('dialog:pickFiles', async (): Promise<Result<PickedUploadFile[]>> => safe(async () => {
@@ -428,6 +634,28 @@ function registerIpcHandlers() {
   ipcMain.handle('shell:openExternal', async (_e, url: string) => safe(async () => {
     await openSafeExternal(url);
     return true;
+  }));
+
+  // ===== App version / update check =====
+  ipcMain.handle('app:version', async () => safe(async () => app.getVersion()));
+
+  ipcMain.handle('app:checkUpdate', async (): Promise<Result<UpdateInfo>> => safe(async () => {
+    const current = app.getVersion();
+    const data = await fetchLatestRelease();
+    if (!data) throw new Error('Could not reach GitHub releases.');
+    const latestVersion = String(data.tag_name || '').replace(/^v/, '');
+    const releaseNotes = String(data.body || '').slice(0, 400) || undefined;
+    return {
+      hasUpdate: latestVersion ? compareVersions(latestVersion, current) > 0 : false,
+      latestVersion,
+      downloadUrl: `https://github.com/${GITHUB_REPO}/releases/latest`,
+      releaseNotes,
+    };
+  }));
+
+  ipcMain.handle('app:downloadAndInstall', async (): Promise<Result<true>> => safe(async () => {
+    await autoCheckAndPromptUpdate();
+    return true as const;
   }));
 
   ipcMain.handle('shell:fetchAWSStatus', async () => safe(async () =>
