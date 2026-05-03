@@ -90,11 +90,9 @@
     },
     "win": {
       "target": "nsis",
-      "icon": "assets/icon.ico",
-      "publisherName": "Debajyoti"
+      "icon": "assets/icon.ico"
     },
     "nsis": {
-      "installerName": "Debajyoti Drive Setup",
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "createDesktopShortcut": true,
