@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 console.log('[Preload] starting — contextBridge available:', typeof contextBridge);
 import type {
   AppConfig,
@@ -6,12 +6,16 @@ import type {
   FolderInfo,
   GDriveConfig,
   GDriveFile,
-  MultiConfig,
+  PickedFolderFile,
+  PickedUploadFile,
+  PublicAppConfig,
+  PublicMultiConfig,
   RestoreRequest,
   Result,
   S3Object,
   S3ObjectVersion,
   StorageClass,
+  UploadRequest,
   UploadProgress
 } from '../shared/types';
 
@@ -19,10 +23,10 @@ import type {
 // the renderer stays sandboxed and can only do what we explicitly expose.
 const api = {
   config: {
-    get: (): Promise<Result<AppConfig | null>> => ipcRenderer.invoke('config:get'),
-    getAll: (): Promise<Result<MultiConfig | null>> => ipcRenderer.invoke('config:getAll'),
-    set: (cfg: AppConfig): Promise<Result<AppConfig>> => ipcRenderer.invoke('config:set', cfg),
-    setActive: (index: number): Promise<Result<AppConfig | null>> => ipcRenderer.invoke('config:setActive', index),
+    get: (): Promise<Result<PublicAppConfig | null>> => ipcRenderer.invoke('config:get'),
+    getAll: (): Promise<Result<PublicMultiConfig | null>> => ipcRenderer.invoke('config:getAll'),
+    set: (cfg: AppConfig): Promise<Result<PublicAppConfig>> => ipcRenderer.invoke('config:set', cfg),
+    setActive: (index: number): Promise<Result<PublicAppConfig | null>> => ipcRenderer.invoke('config:setActive', index),
     remove: (index: number): Promise<Result<true>> => ipcRenderer.invoke('config:remove', index),
     onConnectLog: (cb: (msg: string) => void): (() => void) => {
       const listener = (_e: unknown, msg: string) => cb(msg);
@@ -35,7 +39,7 @@ const api = {
       ipcRenderer.invoke('s3:list', prefix),
     search: (query: string): Promise<Result<S3Object[]>> =>
       ipcRenderer.invoke('s3:search', query),
-    upload: (args: { localPath: string; key: string; storageClass: StorageClass }): Promise<Result<true>> =>
+    upload: (args: UploadRequest): Promise<Result<true>> =>
       ipcRenderer.invoke('s3:upload', args),
     download: (args: { key: string; versionId?: string }): Promise<Result<string | null>> =>
       ipcRenderer.invoke('s3:download', args),
@@ -81,9 +85,18 @@ const api = {
     }
   },
   dialog: {
-    pickFiles: (): Promise<Result<string[]>> => ipcRenderer.invoke('dialog:pickFiles'),
-    pickFolder: (): Promise<Result<{ folderName: string; files: { localPath: string; relativePath: string }[] } | null>> =>
+    pickFiles: (): Promise<Result<PickedUploadFile[]>> => ipcRenderer.invoke('dialog:pickFiles'),
+    pickFolder: (): Promise<Result<{ folderName: string; files: PickedFolderFile[] } | null>> =>
       ipcRenderer.invoke('dialog:pickFolder'),
+    registerDroppedFiles: (files: File[]): Promise<Result<PickedUploadFile[]>> => {
+      const paths = Array.from(files)
+        .map(file => {
+          try { return webUtils.getPathForFile(file); }
+          catch { return ''; }
+        })
+        .filter((path): path is string => Boolean(path));
+      return ipcRenderer.invoke('dialog:registerDroppedFiles', paths);
+    },
   },
   shell: {
     openExternal: (url: string): Promise<Result<true>> =>

@@ -1,10 +1,12 @@
 import { OAuth2Client } from 'google-auth-library';
 import { google } from 'googleapis';
 import { createServer } from 'node:http';
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import type { Readable } from 'node:stream';
 import type { GDriveConfig, GDriveFile } from '@shared/types';
+import { canUseSecureStorage, readJsonFile, writeSecureJsonFile } from './secureStore';
 
 const REDIRECT_PORT = 9876;
 const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/callback`;
@@ -25,8 +27,11 @@ export class GoogleDriveService {
     this.auth = new OAuth2Client(cfg.clientId, cfg.clientSecret, REDIRECT_URI);
     if (existsSync(this.tokensPath)) {
       try {
-        const tokens = JSON.parse(readFileSync(this.tokensPath, 'utf-8'));
-        this.auth.setCredentials(tokens);
+        const tokens = readJsonFile<Parameters<OAuth2Client['setCredentials']>[0]>(this.tokensPath);
+        if (tokens) {
+          this.auth.setCredentials(tokens);
+          if (canUseSecureStorage()) writeSecureJsonFile(this.tokensPath, tokens);
+        }
       } catch { /* corrupt file — ignore */ }
     }
   }
@@ -35,41 +40,85 @@ export class GoogleDriveService {
     return !!this.auth.credentials?.access_token;
   }
 
-  getAuthUrl(): string {
+  getAuthUrl(state: string): string {
     return this.auth.generateAuthUrl({
       access_type: 'offline',
       prompt: 'consent',
+      state,
       scope: ['https://www.googleapis.com/auth/drive.readonly'],
     });
   }
 
-  async authenticate(openUrl: (url: string) => void): Promise<void> {
+  async authenticate(openUrl: (url: string) => void | Promise<void>): Promise<void> {
     return new Promise((resolve, reject) => {
+      const state = randomBytes(32).toString('base64url');
+      let settled = false;
+      let timeout: NodeJS.Timeout;
+
+      const finish = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        server.close();
+        if (err) reject(err);
+        else resolve();
+      };
+
       const server = createServer(async (req, res) => {
-        if (!req.url?.startsWith('/callback')) return;
+        if (!req.url) {
+          res.writeHead(404).end();
+          return;
+        }
         const url = new URL(req.url, `http://localhost:${REDIRECT_PORT}`);
+        if (url.pathname !== '/callback') {
+          res.writeHead(404).end();
+          return;
+        }
+
         const code = url.searchParams.get('code');
         const error = url.searchParams.get('error');
+        const returnedState = url.searchParams.get('state');
 
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end('<html><body><h2>Connected! You can close this tab.</h2></body></html>');
-        server.close();
+        if (returnedState !== state) {
+          res.writeHead(400, { 'Content-Type': 'text/html' });
+          res.end('<html><body><h2>Invalid authentication state.</h2></body></html>');
+          finish(new Error('Invalid Google Drive authentication state.'));
+          return;
+        }
 
-        if (error || !code) { reject(new Error(error ?? 'No code returned')); return; }
+        if (error || !code) {
+          res.writeHead(400, { 'Content-Type': 'text/html' });
+          res.end('<html><body><h2>Google Drive connection failed.</h2></body></html>');
+          finish(new Error(error ?? 'No code returned'));
+          return;
+        }
+
         try {
           const { tokens } = await this.auth.getToken(code);
           this.auth.setCredentials(tokens);
-          writeFileSync(this.tokensPath, JSON.stringify(tokens), 'utf-8');
-          resolve();
-        } catch (err) { reject(err); }
+          writeSecureJsonFile(this.tokensPath, tokens);
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end('<html><body><h2>Connected! You can close this tab.</h2></body></html>');
+          finish();
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'text/html' });
+          res.end('<html><body><h2>Google Drive connection failed.</h2></body></html>');
+          finish(err instanceof Error ? err : new Error(String(err)));
+        }
       });
 
       server.listen(REDIRECT_PORT, '127.0.0.1', () => {
-        openUrl(this.getAuthUrl());
+        try {
+          Promise.resolve(openUrl(this.getAuthUrl(state))).catch((err) => {
+            finish(err instanceof Error ? err : new Error(String(err)));
+          });
+        } catch (err) {
+          finish(err instanceof Error ? err : new Error(String(err)));
+        }
       });
 
-      server.on('error', reject);
-      setTimeout(() => { server.close(); reject(new Error('Auth timeout (5 min).')); }, 5 * 60 * 1000);
+      server.on('error', (err) => finish(err));
+      timeout = setTimeout(() => finish(new Error('Auth timeout (5 min).')), 5 * 60 * 1000);
     });
   }
 

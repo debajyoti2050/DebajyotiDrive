@@ -7,6 +7,7 @@ export interface UploadJob {
   name: string;
   key: string;
   localPath: string;
+  uploadId?: string;
   loaded: number;
   total: number;
   done: boolean;
@@ -15,12 +16,14 @@ export interface UploadJob {
   speed: number;
   type?: 'upload' | 'download';
   queued?: boolean;
+  runId?: string;
 }
 
 interface Props {
   jobs: UploadJob[];
   onDismiss: () => void;
   onCancel?: (id: string) => void;
+  onCancelAll?: () => void;
 }
 
 function formatEta(seconds: number): string {
@@ -45,7 +48,7 @@ function StatusDot({ active }: { active: boolean }) {
   );
 }
 
-export const UploadPanel: React.FC<Props> = ({ jobs, onDismiss, onCancel }) => {
+export const UploadPanel: React.FC<Props> = ({ jobs, onDismiss, onCancel, onCancelAll }) => {
   const [minimized, setMinimized] = useState(false);
 
   const total = jobs.length;
@@ -57,6 +60,8 @@ export const UploadPanel: React.FC<Props> = ({ jobs, onDismiss, onCancel }) => {
 
   const activeUploads = jobs.filter(j => !j.done && j.type !== 'download');
   const activeDownloads = jobs.filter(j => !j.done && j.type === 'download');
+  const canCancelAll = activeUploads.length > 0 && onCancelAll;
+  const queued = jobs.filter(j => j.queued && !j.done).length;
   const headerLabel = allDone
     ? errors > 0 ? `${errors} FAILED` : `${total} COMPLETE`
     : [
@@ -82,6 +87,16 @@ export const UploadPanel: React.FC<Props> = ({ jobs, onDismiss, onCancel }) => {
           </motion.span>
         </div>
         <div className="xfer-header-right">
+          {canCancelAll && (
+            <motion.button
+              className="xfer-cancel-all-btn"
+              onClick={e => { e.stopPropagation(); onCancelAll?.(); }}
+              whileHover={{ scale: 1.04, color: 'var(--danger)' }}
+              whileTap={{ scale: 0.94 }}
+            >
+              Cancel all
+            </motion.button>
+          )}
           {!allDone && (
             <motion.span
               className="xfer-pct"
@@ -141,6 +156,16 @@ export const UploadPanel: React.FC<Props> = ({ jobs, onDismiss, onCancel }) => {
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.22, ease: [0.25, 0.46, 0.45, 0.94] }}
           >
+            {total > 3 && (
+              <div className="xfer-summary">
+                <span>{done}/{total} done</span>
+                {activeUploads.length > 0 && <span>{activeUploads.length} uploading</span>}
+                {activeDownloads.length > 0 && <span>{activeDownloads.length} downloading</span>}
+                {queued > 0 && <span>{queued} queued</span>}
+                {errors > 0 && <span className="xfer-summary-error">{errors} failed</span>}
+              </div>
+            )}
+
             <AnimatePresence>
               {jobs.map(j => {
                 const pct = j.total > 0 ? j.loaded / j.total * 100 : 0;

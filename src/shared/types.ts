@@ -150,13 +150,31 @@ export interface AppConfig {
   profile?: string;
 }
 
-export interface MultiConfig {
-  buckets: AppConfig[];
+export interface MultiConfig<TBucket = AppConfig> {
+  buckets: TBucket[];
   activeIndex: number;
 }
 
+export interface PublicAppConfig {
+  region: string;
+  bucket: string;
+  profile?: string;
+  hasExplicitCredentials: boolean;
+}
+
+export type PublicMultiConfig = MultiConfig<PublicAppConfig>;
+
+export interface PickedUploadFile {
+  id: string;
+  name: string;
+}
+
+export interface PickedFolderFile extends PickedUploadFile {
+  relativePath: string;
+}
+
 export interface UploadRequest {
-  localPath: string;
+  uploadId: string;
   key: string;
   storageClass: StorageClass;
 }

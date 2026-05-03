@@ -31,8 +31,7 @@ import {
   S3ObjectVersion,
   StorageClass,
   TierStats,
-  UploadProgress,
-  UploadRequest
+  UploadProgress
 } from '@shared/types';
 
 // Load .env from the project root (works in both dev and packaged app)
@@ -52,6 +51,20 @@ function partSizeFor(fileSize: number): number {
 function queueSizeFor(partSize: number): number {
   // Keep concurrent in-flight data under MAX_IN_FLIGHT; at least 1, at most 4.
   return Math.max(1, Math.min(4, Math.floor(MAX_IN_FLIGHT / partSize)));
+}
+
+interface LocalUploadRequest {
+  localPath: string;
+  key: string;
+  storageClass: StorageClass;
+}
+
+function requireFolderPrefix(prefix: string): string {
+  const normalized = String(prefix ?? '').replace(/\\/g, '/');
+  if (!normalized || normalized === '/' || !normalized.endsWith('/')) {
+    throw new Error('Refusing folder operation without a non-empty folder prefix.');
+  }
+  return normalized;
 }
 
 export class S3Service {
@@ -176,7 +189,7 @@ export class S3Service {
    * Changing storage class later requires a CopyObject (we expose that separately).
    */
   async upload(
-    req: UploadRequest,
+    req: LocalUploadRequest,
     onProgress: (p: UploadProgress) => void
   ): Promise<void> {
     const stat = statSync(req.localPath);
@@ -269,11 +282,12 @@ export class S3Service {
 
   /** Recursively delete all objects under a prefix. Returns deleted count. */
   async deleteFolder(prefix: string): Promise<number> {
+    const folderPrefix = requireFolderPrefix(prefix);
     const keys: string[] = [];
     let token: string | undefined;
     do {
       const res = await this.client.send(new ListObjectsV2Command({
-        Bucket: this.bucket, Prefix: prefix, ContinuationToken: token
+        Bucket: this.bucket, Prefix: folderPrefix, ContinuationToken: token
       }));
       for (const obj of res.Contents ?? []) {
         if (obj.Key) keys.push(obj.Key);
@@ -298,9 +312,10 @@ export class S3Service {
     onProgress: (p: UploadProgress) => void,
     jobKey: string
   ): Promise<void> {
+    const folderPrefixes = prefixes.map(requireFolderPrefix);
     // List all objects across all prefixes
     const objects: { key: string; size: number }[] = [];
-    for (const prefix of prefixes) {
+    for (const prefix of folderPrefixes) {
       let token: string | undefined;
       do {
         const res = await this.client.send(new ListObjectsV2Command({
@@ -327,7 +342,7 @@ export class S3Service {
     arc.pipe(output);
 
     // Common prefix to strip so zip paths are relative
-    const commonPrefix = prefixes.length === 1 ? prefixes[0] : '';
+    const commonPrefix = folderPrefixes.length === 1 ? folderPrefixes[0] : '';
 
     for (const obj of objects) {
       const getRes = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: obj.key }));

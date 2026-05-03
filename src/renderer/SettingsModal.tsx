@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { AppConfig } from '@shared/types';
+import type { AppConfig, PublicAppConfig } from '@shared/types';
 
 const COMMON_REGIONS = [
   'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
@@ -11,7 +11,7 @@ const COMMON_REGIONS = [
 ];
 
 interface Props {
-  configs: AppConfig[];
+  configs: PublicAppConfig[];
   activeIndex: number;
   onClose: () => void;
   onSave: (cfg: AppConfig) => Promise<string | null>;

@@ -1,13 +1,11 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { STORAGE_CLASSES, StorageClass } from '@shared/types';
-
-interface PickedFile { localPath: string; name: string; }
+import { PickedUploadFile, STORAGE_CLASSES, StorageClass } from '@shared/types';
 
 interface Props {
   prefix: string;
   onClose: () => void;
-  onUpload: (files: PickedFile[], storageClass: StorageClass) => void;
+  onUpload: (files: PickedUploadFile[], storageClass: StorageClass) => void;
 }
 
 const MAX_BATCH = 10;
@@ -24,17 +22,17 @@ function fmtINR(usd: number) {
 }
 
 export const UploadModal: React.FC<Props> = ({ prefix, onClose, onUpload }) => {
-  const [files, setFiles] = useState<PickedFile[]>([]);
+  const [files, setFiles] = useState<PickedUploadFile[]>([]);
   const [storageClass, setStorageClass] = useState<StorageClass>('STANDARD');
   const [isDragHover, setIsDragHover] = useState(false);
+  const [folderRoots, setFolderRoots] = useState<string[]>([]);
 
   const pickFiles = async () => {
     const res = await window.s3drive.dialog.pickFiles();
     if (!res.ok) return;
-    const picked = res.value.map(p => ({ localPath: p, name: p.split(/[/\\]/).pop() ?? p }));
     setFiles(prev => {
-      const existing = new Set(prev.map(f => f.localPath));
-      return [...prev, ...picked.filter(p => !existing.has(p.localPath))];
+      const existing = new Set(prev.map(f => f.id));
+      return [...prev, ...res.value.filter(p => !existing.has(p.id))];
     });
   };
 
@@ -42,13 +40,14 @@ export const UploadModal: React.FC<Props> = ({ prefix, onClose, onUpload }) => {
     const res = await window.s3drive.dialog.pickFolder();
     if (!res.ok || !res.value) return;
     const { folderName, files: folderFiles } = res.value;
+    setFolderRoots(prev => prev.includes(folderName) ? prev : [...prev, folderName]);
     const picked = folderFiles.map(f => ({
-      localPath: f.localPath,
+      id: f.id,
       name: `${folderName}/${f.relativePath}`,
     }));
     setFiles(prev => {
-      const existing = new Set(prev.map(f => f.localPath));
-      return [...prev, ...picked.filter(p => !existing.has(p.localPath))];
+      const existing = new Set(prev.map(f => f.id));
+      return [...prev, ...picked.filter(p => !existing.has(p.id))];
     });
   };
 
@@ -56,6 +55,11 @@ export const UploadModal: React.FC<Props> = ({ prefix, onClose, onUpload }) => {
   const tierColor = TIER_COLORS[selectedInfo.costTier];
   const overBatch = files.length > MAX_BATCH;
   const queueBatches = Math.ceil(files.length / MAX_BATCH);
+  const isFolderUpload = folderRoots.length > 0;
+  const clearQueue = () => {
+    setFiles([]);
+    setFolderRoots([]);
+  };
 
   return (
     <motion.div
@@ -186,28 +190,40 @@ export const UploadModal: React.FC<Props> = ({ prefix, onClose, onUpload }) => {
                         <polyline points="17 8 12 3 7 8"/>
                         <line x1="12" y1="3" x2="12" y2="15"/>
                       </motion.svg>
-                      <span className="dz-label">CLICK TO SELECT FILES</span>
-                      <span className="dz-hint">or drag &amp; drop</span>
+                      <span className="dz-label">SELECT FILES OR FOLDER</span>
+                      <span className="dz-hint">storage tier is chosen on the right</span>
                     </motion.div>
                   )}
                 </AnimatePresence>
               </div>
             </motion.div>
 
-            {/* Folder upload button */}
-            <motion.button
-              className="upload-folder-btn"
-              onClick={pickFolder}
-              style={{ color: 'var(--text-faint)', borderColor: `${tierColor}40` }}
-              whileHover={{ borderColor: tierColor, color: tierColor, scale: 1.02 }}
-              whileTap={{ scale: 0.97 }}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                <line x1="12" y1="11" x2="12" y2="17"/><polyline points="9 14 12 11 15 14"/>
-              </svg>
-              UPLOAD FOLDER
-            </motion.button>
+            <div className="upload-source-actions">
+              <motion.button
+                className="upload-source-btn"
+                onClick={pickFiles}
+                style={{ '--source-color': tierColor } as React.CSSProperties}
+                whileHover={{ y: -1, borderColor: tierColor }}
+                whileTap={{ scale: 0.98 }}
+              >
+                <span className="upload-source-icon">+</span>
+                Add files
+              </motion.button>
+
+              <motion.button
+                className="upload-source-btn folder"
+                onClick={pickFolder}
+                style={{ '--source-color': tierColor } as React.CSSProperties}
+                whileHover={{ y: -1, borderColor: tierColor }}
+                whileTap={{ scale: 0.98 }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                  <line x1="12" y1="11" x2="12" y2="17"/><polyline points="9 14 12 11 15 14"/>
+                </svg>
+                Upload folder
+              </motion.button>
+            </div>
 
             {/* File list */}
             <AnimatePresence>
@@ -218,18 +234,23 @@ export const UploadModal: React.FC<Props> = ({ prefix, onClose, onUpload }) => {
                   animate={{ opacity: 1, height: 'auto' }}
                   exit={{ opacity: 0, height: 0 }}
                 >
-                  {/* Add more button */}
-                  <motion.button
-                    className="upload-add-more"
-                    onClick={pickFiles}
-                    whileHover={{ borderColor: tierColor, color: tierColor }}
-                    style={{ color: 'var(--text-faint)' }}
-                  >+ ADD MORE</motion.button>
+                  <div className="upload-queue-head">
+                    <div>
+                      <div className="upload-queue-title">
+                        {isFolderUpload ? 'Folder upload queue' : 'Upload queue'}
+                      </div>
+                      <div className="upload-queue-meta">
+                        {isFolderUpload ? folderRoots.join(', ') : `${files.length} file${files.length !== 1 ? 's' : ''}`}
+                        {' '}· {selectedInfo.label} for all queued files
+                      </div>
+                    </div>
+                    <button className="upload-clear-btn" onClick={clearQueue}>Clear</button>
+                  </div>
 
                   <div className="upload-file-rows">
                     {files.map((f, i) => (
                       <motion.div
-                        key={f.localPath}
+                        key={f.id}
                         className="upload-file-item"
                         initial={{ opacity: 0, x: -14 }}
                         animate={{ opacity: 1, x: 0 }}

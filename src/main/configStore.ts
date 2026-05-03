@@ -1,9 +1,27 @@
 import { app } from 'electron';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import type { AppConfig, MultiConfig } from '@shared/types';
+import type { AppConfig, MultiConfig, PublicAppConfig, PublicMultiConfig } from '@shared/types';
+import { canUseSecureStorage, readJsonFile, writeJsonFile, writeSecureJsonFile } from './secureStore';
 
 const CONFIG_FILE = 'config.json';
+
+function hasSavedCredentials(config: AppConfig): boolean {
+  return !!(config.accessKeyId || config.secretAccessKey);
+}
+
+function containsSecrets(config: MultiConfig): boolean {
+  return config.buckets.some(hasSavedCredentials);
+}
+
+export function toPublicAppConfig(config: AppConfig): PublicAppConfig {
+  return {
+    bucket: config.bucket,
+    region: config.region,
+    profile: config.profile,
+    hasExplicitCredentials: hasSavedCredentials(config)
+  };
+}
 
 /**
  * Multi-bucket config store. Lives in Electron's userData dir:
@@ -27,20 +45,30 @@ export class ConfigStore {
   }
 
   private save(mc: MultiConfig): void {
+    if (canUseSecureStorage() || containsSecrets(mc)) {
+      writeSecureJsonFile(this.path, mc);
+    } else {
+      writeJsonFile(this.path, mc);
+    }
     this.cache = mc;
-    writeFileSync(this.path, JSON.stringify(mc, null, 2), 'utf-8');
   }
 
   getAll(): MultiConfig | null {
     if (this.cache) return this.cache;
     if (!existsSync(this.path)) return null;
     try {
-      const raw = readFileSync(this.path, 'utf-8');
-      const parsed = JSON.parse(raw);
+      const parsed = readJsonFile<any>(this.path);
+      if (!parsed) return null;
       // Backward compat: old format had bucket/region at root level
       if (parsed.bucket && parsed.region) {
         this.cache = {
-          buckets: [{ bucket: parsed.bucket, region: parsed.region, profile: parsed.profile }],
+          buckets: [{
+            bucket: parsed.bucket,
+            region: parsed.region,
+            accessKeyId: parsed.accessKeyId,
+            secretAccessKey: parsed.secretAccessKey,
+            profile: parsed.profile
+          }],
           activeIndex: 0
         };
       } else if (Array.isArray(parsed.buckets) && parsed.buckets.length > 0) {
@@ -48,10 +76,22 @@ export class ConfigStore {
       } else {
         return null;
       }
+      if (this.cache && canUseSecureStorage() && containsSecrets(this.cache)) {
+        this.save(this.cache);
+      }
       return this.cache;
     } catch {
       return null;
     }
+  }
+
+  getAllPublic(): PublicMultiConfig | null {
+    const mc = this.getAll();
+    if (!mc) return null;
+    return {
+      activeIndex: mc.activeIndex,
+      buckets: mc.buckets.map(toPublicAppConfig)
+    };
   }
 
   get(): AppConfig | null {
@@ -59,6 +99,11 @@ export class ConfigStore {
     if (!mc || mc.buckets.length === 0) return null;
     const idx = Math.max(0, Math.min(mc.activeIndex, mc.buckets.length - 1));
     return mc.buckets[idx] ?? null;
+  }
+
+  getPublic(): PublicAppConfig | null {
+    const config = this.get();
+    return config ? toPublicAppConfig(config) : null;
   }
 
   /** Add or update a bucket config and make it the active bucket. */
@@ -100,7 +145,7 @@ export class ConfigStore {
   clear(): void {
     this.cache = null;
     if (existsSync(this.path)) {
-      writeFileSync(this.path, '{}', 'utf-8');
+      writeJsonFile(this.path, {});
     }
   }
 }

@@ -1,22 +1,28 @@
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import * as nodeHttps from 'node:https';
 import { S3Service } from './s3Service';
-import { ConfigStore } from './configStore';
+import { ConfigStore, toPublicAppConfig } from './configStore';
 import { GoogleDriveService } from './googleDriveService';
+import { canUseSecureStorage, readJsonFile, writeSecureJsonFile } from './secureStore';
 import type {
   AppConfig,
   BucketAnalytics,
   GDriveConfig,
   GDriveFile,
-  MultiConfig,
+  PickedFolderFile,
+  PickedUploadFile,
+  PublicAppConfig,
+  PublicMultiConfig,
   RestoreRequest,
   Result,
   S3Object,
   S3ObjectVersion,
   StorageClass,
+  UploadRequest,
   UploadProgress
 } from '@shared/types';
 
@@ -24,15 +30,101 @@ let mainWindow: BrowserWindow | null = null;
 let s3: S3Service | null = null;
 const configStore = new ConfigStore();
 let gdrive: GoogleDriveService | null = null;
+const pendingUploads = new Map<string, { localPath: string; selectedAt: number }>();
+const UPLOAD_TOKEN_TTL_MS = 30 * 60 * 1000;
 
 function gdriveConfigPath() { return join(app.getPath('userData'), 'gdrive-config.json'); }
+
+function prunePendingUploads(): void {
+  const cutoff = Date.now() - UPLOAD_TOKEN_TTL_MS;
+  for (const [id, entry] of pendingUploads) {
+    if (entry.selectedAt < cutoff) pendingUploads.delete(id);
+  }
+}
+
+function registerUploadFile(localPath: string, displayName?: string): PickedUploadFile {
+  prunePendingUploads();
+  const id = randomUUID();
+  pendingUploads.set(id, { localPath, selectedAt: Date.now() });
+  return { id, name: (displayName || basename(localPath) || 'file').replace(/\\/g, '/') };
+}
+
+function consumeUploadPath(uploadId: string): string {
+  prunePendingUploads();
+  const entry = pendingUploads.get(uploadId);
+  if (!entry) throw new Error('Upload selection expired. Pick the file again.');
+  pendingUploads.delete(uploadId);
+  return entry.localPath;
+}
+
+function collectFolderUploadFiles(folderPath: string): { folderName: string; files: PickedFolderFile[] } {
+  const folderName = basename(folderPath) || 'folder';
+  const files: PickedFolderFile[] = [];
+
+  function walk(dir: string, base: string) {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      const rel = (base ? `${base}/${entry}` : entry).replace(/\\/g, '/');
+      const st = lstatSync(full);
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) {
+        walk(full, rel);
+      } else if (st.isFile()) {
+        files.push({ ...registerUploadFile(full), relativePath: rel });
+      }
+    }
+  }
+
+  walk(folderPath, '');
+  return { folderName, files };
+}
+
+function requireObjectKey(key: string): string {
+  const normalized = String(key ?? '').replace(/\\/g, '/');
+  if (!normalized || normalized.endsWith('/')) throw new Error('A file name is required.');
+  return normalized;
+}
+
+function safeTempName(key: string): string {
+  const raw = key.replace(/\\/g, '/').split('/').pop() || 'preview';
+  const cleaned = raw.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/^\.+$/, '_');
+  return cleaned || 'preview';
+}
+
+function requireHttpsUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error('Invalid external URL.');
+  }
+  if (parsed.protocol !== 'https:') throw new Error('Only HTTPS URLs can be opened externally.');
+  return parsed.toString();
+}
+
+async function openSafeExternal(url: string): Promise<void> {
+  await shell.openExternal(requireHttpsUrl(url));
+}
+
+function isAllowedAppNavigation(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (process.env.NODE_ENV === 'development') {
+      return parsed.origin === 'http://localhost:5173' || parsed.origin === 'http://127.0.0.1:5173';
+    }
+    return parsed.protocol === 'file:';
+  } catch {
+    return false;
+  }
+}
 
 function loadGDriveService(): GoogleDriveService | null {
   const p = gdriveConfigPath();
   if (!existsSync(p)) return null;
   try {
-    const cfg: GDriveConfig = JSON.parse(readFileSync(p, 'utf-8'));
-    if (!cfg.clientId || !cfg.clientSecret) return null;
+    const cfg = readJsonFile<GDriveConfig>(p);
+    if (!cfg?.clientId || !cfg.clientSecret) return null;
+    if (canUseSecureStorage()) writeSecureJsonFile(p, cfg);
     return new GoogleDriveService(cfg, app.getPath('userData'));
   } catch { return null; }
 }
@@ -64,7 +156,8 @@ function createWindow() {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: true
     }
   });
 
@@ -74,6 +167,17 @@ function createWindow() {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
   }
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    openSafeExternal(url).catch((err) => console.error('[Shell] Blocked external URL:', err));
+    return { action: 'deny' };
+  });
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isAllowedAppNavigation(url)) return;
+    event.preventDefault();
+    openSafeExternal(url).catch((err) => console.error('[Shell] Blocked navigation URL:', err));
+  });
 }
 
 app.whenReady().then(() => {
@@ -98,37 +202,39 @@ app.on('window-all-closed', () => {
 
 function registerIpcHandlers() {
   // ===== Config =====
-  ipcMain.handle('config:get', async () => safe(async () => {
+  ipcMain.handle('config:get', async (): Promise<Result<PublicAppConfig | null>> => safe(async () => {
     const stored = configStore.get();
     if (stored?.bucket && stored?.region) {
       console.log(`[Config] Loaded saved config — bucket: "${stored.bucket}", region: "${stored.region}"`);
-      return stored;
+      return toPublicAppConfig(stored);
     }
     console.log('[Config] No saved config found — waiting for user to configure via Settings');
     return null;
   }));
 
-  ipcMain.handle('config:set', async (_e, cfg: AppConfig) => safe(async () => {
+  ipcMain.handle('config:set', async (_e, cfg: AppConfig): Promise<Result<PublicAppConfig>> => safe(async () => {
     const push = (msg: string) => mainWindow?.webContents.send('s3:connectLog', msg);
     push(`bucket: "${cfg.bucket}"  region: "${cfg.region}"  profile: "${cfg.profile ?? 'default'}"`);
     const service = new S3Service(cfg);
     await service.testConnection(push);
     configStore.set(cfg);
     s3 = service;
+    pendingUploads.clear();
     push('Config saved.');
-    return cfg;
+    return toPublicAppConfig(cfg);
   }));
 
-  ipcMain.handle('config:getAll', async (): Promise<Result<MultiConfig | null>> =>
-    safe(async () => configStore.getAll())
+  ipcMain.handle('config:getAll', async (): Promise<Result<PublicMultiConfig | null>> =>
+    safe(async () => configStore.getAllPublic())
   );
 
-  ipcMain.handle('config:setActive', async (_e, index: number): Promise<Result<AppConfig | null>> =>
+  ipcMain.handle('config:setActive', async (_e, index: number): Promise<Result<PublicAppConfig | null>> =>
     safe(async () => {
       const cfg = configStore.setActive(index);
       if (!cfg) throw new Error('Invalid bucket index');
       s3 = new S3Service(cfg);
-      return cfg;
+      pendingUploads.clear();
+      return toPublicAppConfig(cfg);
     })
   );
 
@@ -136,7 +242,8 @@ function registerIpcHandlers() {
     safe(async () => {
       configStore.remove(index);
       const active = configStore.get();
-      if (active) s3 = new S3Service(active);
+      s3 = active ? new S3Service(active) : null;
+      pendingUploads.clear();
       return true as const;
     })
   );
@@ -151,42 +258,65 @@ function registerIpcHandlers() {
   );
 
   // ===== Upload =====
-  ipcMain.handle('dialog:pickFiles', async () => safe(async () => {
+  ipcMain.handle('dialog:pickFiles', async (): Promise<Result<PickedUploadFile[]>> => safe(async () => {
     const res = await dialog.showOpenDialog(mainWindow!, {
       properties: ['openFile', 'multiSelections']
     });
-    return res.canceled ? [] : res.filePaths;
+    return res.canceled ? [] : res.filePaths.map(path => registerUploadFile(path));
   }));
 
-  ipcMain.handle('dialog:pickFolder', async () => safe(async () => {
+  ipcMain.handle('dialog:pickFolder', async (): Promise<Result<{
+    folderName: string;
+    files: PickedFolderFile[];
+  } | null>> => safe(async () => {
     const res = await dialog.showOpenDialog(mainWindow!, {
       properties: ['openDirectory']
     });
     if (res.canceled || !res.filePaths[0]) return null;
-    const folderPath = res.filePaths[0];
-    const folderName = folderPath.replace(/\\/g, '/').split('/').pop() ?? 'folder';
-    const files: { localPath: string; relativePath: string }[] = [];
-    function walk(dir: string, base: string) {
-      for (const entry of readdirSync(dir)) {
-        const full = join(dir, entry);
-        const rel = base ? `${base}/${entry}` : entry;
-        if (statSync(full).isDirectory()) {
-          walk(full, rel);
-        } else {
-          files.push({ localPath: full, relativePath: rel });
-        }
+    return collectFolderUploadFiles(res.filePaths[0]);
+  }));
+
+  ipcMain.handle('dialog:registerDroppedFiles', async (
+    _e,
+    paths: string[]
+  ): Promise<Result<PickedUploadFile[]>> => safe(async () => {
+    if (!Array.isArray(paths)) return [];
+    const picked: PickedUploadFile[] = [];
+    const seen = new Set<string>();
+
+    for (const rawPath of paths) {
+      if (typeof rawPath !== 'string') continue;
+      const localPath = rawPath.trim();
+      if (!localPath || seen.has(localPath)) continue;
+      seen.add(localPath);
+
+      const st = lstatSync(localPath);
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) {
+        const folder = collectFolderUploadFiles(localPath);
+        picked.push(...folder.files.map(file => ({
+          id: file.id,
+          name: `${folder.folderName}/${file.relativePath}`
+        })));
+      } else if (st.isFile()) {
+        picked.push(registerUploadFile(localPath));
       }
     }
-    walk(folderPath, '');
-    return { folderName, files };
+
+    return picked;
   }));
 
   ipcMain.handle('s3:upload', async (
     _e,
-    args: { localPath: string; key: string; storageClass: StorageClass }
+    args: UploadRequest
   ) => safe(async () => {
     const service = requireS3();
-    await service.upload(args, (p: UploadProgress) => {
+    const localPath = consumeUploadPath(args.uploadId);
+    await service.upload({
+      localPath,
+      key: requireObjectKey(args.key),
+      storageClass: args.storageClass
+    }, (p: UploadProgress) => {
       // Stream progress back to the renderer via a dedicated channel.
       mainWindow?.webContents.send('s3:uploadProgress', p);
     });
@@ -218,7 +348,7 @@ function registerIpcHandlers() {
   // Download to temp, then let the OS open it with the default app.
   // For images and PDFs the renderer will instead call s3:presign and embed.
   ipcMain.handle('s3:previewExternal', async (_e, key: string) => safe(async () => {
-    const tmpPath = join(tmpdir(), `s3drive-${Date.now()}-${key.split('/').pop() ?? 'preview'}`);
+    const tmpPath = join(tmpdir(), `s3drive-${Date.now()}-${safeTempName(key)}`);
     await requireS3().download(key, tmpPath);
     await shell.openPath(tmpPath);
     return tmpPath;
@@ -296,7 +426,7 @@ function registerIpcHandlers() {
 
   // ===== Open external (for share links) =====
   ipcMain.handle('shell:openExternal', async (_e, url: string) => safe(async () => {
-    await shell.openExternal(url);
+    await openSafeExternal(url);
     return true;
   }));
 
@@ -346,7 +476,7 @@ function registerIpcHandlers() {
   // ===== Google Drive =====
   ipcMain.handle('gdrive:init', async (_e, cfg: GDriveConfig): Promise<Result<true>> =>
     safe(async () => {
-      writeFileSync(gdriveConfigPath(), JSON.stringify(cfg), 'utf-8');
+      writeSecureJsonFile(gdriveConfigPath(), cfg);
       gdrive = new GoogleDriveService(cfg, app.getPath('userData'));
       return true as const;
     })
@@ -359,7 +489,7 @@ function registerIpcHandlers() {
   ipcMain.handle('gdrive:auth', async (): Promise<Result<true>> =>
     safe(async () => {
       if (!gdrive) throw new Error('Google Drive not configured.');
-      await gdrive.authenticate((url) => shell.openExternal(url));
+      await gdrive.authenticate(openSafeExternal);
       return true as const;
     })
   );

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import type { AppConfig, BucketAnalytics, FolderInfo, S3Object, StorageClass, UploadProgress } from '@shared/types';
+import type { AppConfig, BucketAnalytics, FolderInfo, PickedUploadFile, PublicAppConfig, S3Object, StorageClass, UploadProgress } from '@shared/types';
 import { STORAGE_CLASSES } from '@shared/types';
 import { Logo } from './Logo';
 import { AuroraBackground } from './AuroraBackground';
@@ -48,7 +48,7 @@ type Toast = { msg: string; kind: 'info' | 'error' | 'success' } | null;
 
 export const App: React.FC = () => {
   // Multi-bucket state
-  const [configs, setConfigs] = useState<AppConfig[]>([]);
+  const [configs, setConfigs] = useState<PublicAppConfig[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [configLoaded, setConfigLoaded] = useState(false);
   const config = configs[activeIndex] ?? null;
@@ -97,8 +97,8 @@ export const App: React.FC = () => {
   const [bucketBytes, setBucketBytes] = useState<number | null>(null);
   const [bucketAnalytics, setBucketAnalytics] = useState<BucketAnalytics | null>(null);
 
-  // View mode: list (default) or tiles
-  const [viewMode, setViewMode] = useState<'list' | 'tiles'>('list');
+  // View mode: tiles (default) or list
+  const [viewMode, setViewMode] = useState<'list' | 'tiles'>('tiles');
 
   // Presigned URLs for tile previews, keyed by S3 key
   const [tileUrls, setTileUrls] = useState<Record<string, string>>({});
@@ -121,6 +121,7 @@ export const App: React.FC = () => {
   const [uploadJobs, setUploadJobs] = useState<UploadJob[]>([]);
   const uploadJobsRef = useRef<UploadJob[]>([]);
   uploadJobsRef.current = uploadJobs;
+  const cancelledUploadRunsRef = useRef<Set<string>>(new Set());
   const [downloadJobs, setDownloadJobs] = useState<UploadJob[]>([]);
 
   const [toast, setToast] = useState<Toast>(null);
@@ -309,11 +310,12 @@ export const App: React.FC = () => {
         setActiveIndex(allRes.value.activeIndex);
       }
     } else {
+      const publicConfig = res.value;
       setConfigs(prev => {
-        const exists = prev.findIndex(b => b.bucket === cfg.bucket && b.region === cfg.region);
-        if (exists >= 0) { const next = [...prev]; next[exists] = cfg; setActiveIndex(exists); return next; }
+        const exists = prev.findIndex(b => b.bucket === publicConfig.bucket && b.region === publicConfig.region);
+        if (exists >= 0) { const next = [...prev]; next[exists] = publicConfig; setActiveIndex(exists); return next; }
         setActiveIndex(prev.length);
-        return [...prev, cfg];
+        return [...prev, publicConfig];
       });
     }
     setPrefix('');
@@ -365,30 +367,52 @@ export const App: React.FC = () => {
 
   const MAX_CONCURRENT = 10;
 
-  const handleUploadStart = (picked: { localPath: string; name: string }[], sc: StorageClass) => {
+  const handleUploadStart = (picked: PickedUploadFile[], sc: StorageClass) => {
+    if (!picked.length) return;
     setShowUpload(false);
     const ts = Date.now();
+    const runId = `upload-${ts}-${Math.random().toString(36).slice(2, 8)}`;
+    cancelledUploadRunsRef.current.delete(runId);
     const jobs: UploadJob[] = picked.map((f, i) => ({
-      id: `${ts}-${i}`, name: f.name,
-      key: `${prefix}${f.name}`, localPath: f.localPath,
+      id: `${runId}-${i}`, name: f.name,
+      key: `${prefix}${f.name}`, localPath: '', uploadId: f.id,
       loaded: 0, total: 0, done: false,
       startTime: 0, speed: 0, type: 'upload' as const,
       queued: i >= MAX_CONCURRENT,
+      runId,
     }));
     setUploadJobs(prev => [...prev, ...jobs]);
 
     (async () => {
       for (let i = 0; i < jobs.length; i += MAX_CONCURRENT) {
-        const batch = jobs.slice(i, i + MAX_CONCURRENT);
+        if (cancelledUploadRunsRef.current.has(runId)) break;
+        const batch = jobs.slice(i, i + MAX_CONCURRENT).filter(job => {
+          const current = uploadJobsRef.current.find(j => j.id === job.id);
+          return !current?.done && !current?.error;
+        });
+        if (!batch.length) continue;
         const batchStart = Date.now();
         setUploadJobs(prev => prev.map(j =>
           batch.some(b => b.id === j.id) ? { ...j, queued: false, startTime: batchStart } : j
         ));
-        await Promise.all(batch.map(job =>
-          window.s3drive.s3.upload({ localPath: job.localPath, key: job.key, storageClass: sc })
-        ));
+        await Promise.all(batch.map(async job => {
+          if (cancelledUploadRunsRef.current.has(runId)) return;
+          const res = await window.s3drive.s3.upload({ uploadId: job.uploadId!, key: job.key, storageClass: sc });
+          if (!res.ok) {
+            setUploadJobs(prev => prev.map(j =>
+              j.id === job.id ? { ...j, done: true, queued: false, error: res.error } : j
+            ));
+          }
+        }));
       }
-      refresh();
+      if (cancelledUploadRunsRef.current.has(runId)) {
+        setUploadJobs(prev => prev.map(j =>
+          j.runId === runId && !j.done ? { ...j, done: true, queued: false, error: 'Cancelled' } : j
+        ));
+      } else {
+        refresh();
+      }
+      cancelledUploadRunsRef.current.delete(runId);
     })();
   };
 
@@ -445,7 +469,29 @@ export const App: React.FC = () => {
       setUploadJobs(prev => prev.map(j => j.id === jobId ? { ...j, done: true, error: 'Cancelled', queued: false } : j));
       return;
     }
+    setUploadJobs(prev => prev.map(j => j.id === jobId ? { ...j, done: true, error: 'Cancelled', queued: false } : j));
     await window.s3drive.s3.cancelUpload(job.key);
+  };
+
+  const cancelAllUploads = async () => {
+    const cancellable = uploadJobsRef.current.filter(j => !j.done && j.type !== 'download');
+    if (!cancellable.length) return;
+
+    for (const runId of cancellable.map(j => j.runId).filter((id): id is string => Boolean(id))) {
+      cancelledUploadRunsRef.current.add(runId);
+    }
+
+    setUploadJobs(prev => prev.map(j =>
+      !j.done && j.type !== 'download' ? { ...j, done: true, error: 'Cancelled', queued: false } : j
+    ));
+
+    await Promise.all(
+      cancellable
+        .filter(j => !j.queued)
+        .map(j => window.s3drive.s3.cancelUpload(j.key))
+    );
+
+    showToast(`Cancelled ${cancellable.length} upload${cancellable.length === 1 ? '' : 's'}`, 'info');
   };
 
   const downloadFile = async (key: string) => {
@@ -532,12 +578,17 @@ export const App: React.FC = () => {
     if (draggedKeyRef.current) return; // internal drag handled by folder row drop
     const fileList = Array.from(e.dataTransfer.files);
     if (!fileList.length) return;
-    // Electron extends File with .path
-    const picked = fileList
-      .map((f: File & { path?: string }) => ({ localPath: f.path ?? '', name: f.name }))
-      .filter(f => f.localPath);
-    if (!picked.length) return;
-    handleUploadStart(picked, 'STANDARD');
+    const res = await window.s3drive.dialog.registerDroppedFiles(fileList);
+    if (!res.ok) {
+      showToast(res.error, 'error');
+      return;
+    }
+    if (!res.value.length) {
+      showToast('No readable files found in the drop.', 'error');
+      return;
+    }
+    handleUploadStart(res.value, 'STANDARD');
+    showToast(`Uploading ${res.value.length} dropped item${res.value.length === 1 ? '' : 's'}`, 'success');
   };
 
   // ── Derived state ───────────────────────────────────────────────────────────
@@ -771,7 +822,11 @@ export const App: React.FC = () => {
         <main
           className={`content${dropZoneActive ? ' drop-zone-active' : ''}`}
           style={{ position: 'relative' }}
-          onDragOver={e => { e.preventDefault(); if (!draggedKey) setDropZoneActive(true); }}
+          onDragOver={e => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = draggedKey ? 'move' : 'copy';
+            if (!draggedKey) setDropZoneActive(true);
+          }}
           onDragLeave={e => {
             if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropZoneActive(false);
           }}
@@ -1410,6 +1465,7 @@ export const App: React.FC = () => {
                   onClick={() => downloadFoldersAction(Array.from(selectedFolders))}
                   whileHover={{ scale: 1.04, boxShadow: '0 0 14px rgba(155,92,246,0.5)' }}
                   whileTap={{ scale: 0.96 }}
+                  title="Zip the selected folder contents and choose where to save the archive"
                 >
                   ↓ Download {selectedFolders.size > 1 ? `${selectedFolders.size} folders` : ''} as ZIP
                 </motion.button>
@@ -1529,12 +1585,19 @@ export const App: React.FC = () => {
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 80, opacity: 0 }}
             transition={{ type: 'spring', damping: 28, stiffness: 300 }}
-            style={{ position: 'fixed', bottom: 0, right: 24, zIndex: 90, minWidth: 340 }}
+            style={{
+              position: 'fixed',
+              bottom: 14,
+              right: 24,
+              zIndex: 90,
+              width: 'min(420px, calc(100vw - 32px))'
+            }}
           >
             <UploadPanel
               jobs={[...uploadJobs, ...downloadJobs]}
               onDismiss={() => { setUploadJobs([]); setDownloadJobs([]); }}
               onCancel={cancelUpload}
+              onCancelAll={cancelAllUploads}
             />
           </motion.div>
         )}
