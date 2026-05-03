@@ -33,7 +33,6 @@
     "@aws-sdk/s3-request-presigner": "^3.658.0",
     "archiver": "^7.0.1",
     "archiver-utils": "^5.0.2",
-    "better-sqlite3": "^11.3.0",
     "dotenv": "^17.4.2",
     "framer-motion": "^12.38.0",
     "googleapis": "^171.4.0",
@@ -43,7 +42,6 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",
     "@types/archiver": "^7.0.0",
-    "@types/better-sqlite3": "^7.6.11",
     "@types/mime-types": "^2.1.4",
     "@types/node": "^20.16.5",
     "@types/react": "^18.3.5",
