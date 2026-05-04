@@ -1,8 +1,8 @@
-import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, Notification } from 'electron';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, readdirSync } from 'node:fs';
+import { createWriteStream, existsSync, lstatSync, readdirSync } from 'node:fs';
 import * as nodeHttps from 'node:https';
 import { S3Service } from './s3Service';
 import { ConfigStore, toPublicAppConfig } from './configStore';
@@ -160,7 +160,19 @@ function collectDroppedPhotoUploads(paths: string[]): PickedPhotoUploadFile[] {
 
 const GITHUB_REPO = 'debajyoti2050/DebajyotiDrive';
 
-async function fetchLatestRelease(): Promise<Record<string, unknown> | null> {
+type GithubReleaseAsset = {
+  name: string;
+  browser_download_url: string;
+};
+
+type GithubRelease = {
+  tag_name?: string;
+  name?: string;
+  body?: string;
+  assets?: GithubReleaseAsset[];
+};
+
+async function fetchLatestRelease(): Promise<GithubRelease | null> {
   return new Promise((resolve) => {
     const req = nodeHttps.get(
       `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
@@ -170,7 +182,7 @@ async function fetchLatestRelease(): Promise<Record<string, unknown> | null> {
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
         res.on('end', () => {
-          try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8'))); }
+          try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8')) as GithubRelease); }
           catch { resolve(null); }
         });
         res.on('error', () => resolve(null));
@@ -181,12 +193,85 @@ async function fetchLatestRelease(): Promise<Record<string, unknown> | null> {
   });
 }
 
+function extractVersion(input: string | undefined): string {
+  const match = String(input || '').match(/(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?/);
+  return match ? `${Number(match[1])}.${Number(match[2])}.${Number(match[3])}` : '';
+}
+
+function latestReleaseVersion(release: GithubRelease): string {
+  return extractVersion(release.tag_name) || extractVersion(release.name);
+}
+
+function selectInstallerAsset(release: GithubRelease): GithubReleaseAsset | null {
+  const assets = release.assets ?? [];
+  const normalizedPlatform = process.platform;
+  if (normalizedPlatform === 'win32') {
+    return assets.find(asset =>
+      /\.exe$/i.test(asset.name) && !/blockmap|uninstaller/i.test(asset.name)
+    ) ?? null;
+  }
+  if (normalizedPlatform === 'darwin') {
+    return assets.find(asset => /\.dmg$/i.test(asset.name)) ?? null;
+  }
+  return assets.find(asset => /\.AppImage$/i.test(asset.name)) ?? null;
+}
+
+function assetDownloadPath(asset: GithubReleaseAsset, version: string): string {
+  const safeName = asset.name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '-');
+  return join(app.getPath('temp'), `debajyoti-drive-${version}-${safeName}`);
+}
+
+async function downloadFile(url: string, destination: string, redirects = 0): Promise<void> {
+  if (redirects > 5) throw new Error('Installer download redirected too many times.');
+  await new Promise<void>((resolve, reject) => {
+    const req = nodeHttps.get(url, {
+      headers: { 'User-Agent': 'DebajyotiDrive-Updater' }
+    }, (res) => {
+      const status = res.statusCode ?? 0;
+      const location = res.headers.location;
+      if (status >= 300 && status < 400 && location) {
+        res.resume();
+        downloadFile(new URL(location, url).toString(), destination, redirects + 1).then(resolve, reject);
+        return;
+      }
+      if (status >= 400) {
+        res.resume();
+        reject(new Error(`Installer download failed (${status}).`));
+        return;
+      }
+
+      const stream = createWriteStream(destination);
+      res.pipe(stream);
+      stream.on('finish', () => stream.close(() => resolve()));
+      stream.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(60_000, () => {
+      req.destroy();
+      reject(new Error('Installer download timed out.'));
+    });
+  });
+}
+
+async function downloadAndLaunchInstaller(release: GithubRelease): Promise<string> {
+  const latestVersion = latestReleaseVersion(release);
+  if (!latestVersion) throw new Error('Latest release does not include a valid version number.');
+  const asset = selectInstallerAsset(release);
+  if (!asset) throw new Error('No native installer asset found for this operating system.');
+  const installerPath = assetDownloadPath(asset, latestVersion);
+  await downloadFile(asset.browser_download_url, installerPath);
+  const openError = await shell.openPath(installerPath);
+  if (openError) throw new Error(openError);
+  setTimeout(() => app.quit(), 1500);
+  return installerPath;
+}
+
 async function autoCheckAndPromptUpdate(): Promise<void> {
   const current = app.getVersion();
   const data = await fetchLatestRelease();
   if (!data) return;
 
-  const latestVersion = String(data.tag_name || '').replace(/^v/, '');
+  const latestVersion = latestReleaseVersion(data);
   if (!latestVersion || compareVersions(latestVersion, current) <= 0) return;
 
   if (!mainWindow) return;
@@ -207,16 +292,13 @@ async function autoCheckAndPromptUpdate(): Promise<void> {
 
   if (response !== 0) return;
 
-  const assets = (data.assets as Array<{ name: string; browser_download_url: string }>) ?? [];
-  const platformExt = process.platform === 'win32' ? '.exe' : process.platform === 'darwin' ? '.dmg' : '.AppImage';
-  const asset = assets.find(a => a.name.endsWith(platformExt));
-  const downloadUrl = asset?.browser_download_url ?? `https://github.com/${GITHUB_REPO}/releases/latest`;
-  await shell.openExternal(downloadUrl);
+  await downloadAndLaunchInstaller(data);
 }
 
 function compareVersions(a: string, b: string): number {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
+  const pa = extractVersion(a).split('.').map(Number);
+  const pb = extractVersion(b).split('.').map(Number);
+  if (pa.length !== 3 || pb.length !== 3 || pa.some(Number.isNaN) || pb.some(Number.isNaN)) return 0;
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
     const diff = (pa[i] || 0) - (pb[i] || 0);
     if (diff !== 0) return diff;
@@ -643,18 +725,37 @@ function registerIpcHandlers() {
     const current = app.getVersion();
     const data = await fetchLatestRelease();
     if (!data) throw new Error('Could not reach GitHub releases.');
-    const latestVersion = String(data.tag_name || '').replace(/^v/, '');
+    const latestVersion = latestReleaseVersion(data);
     const releaseNotes = String(data.body || '').slice(0, 400) || undefined;
     return {
       hasUpdate: latestVersion ? compareVersions(latestVersion, current) > 0 : false,
       latestVersion,
-      downloadUrl: `https://github.com/${GITHUB_REPO}/releases/latest`,
+      currentVersion: current,
+      canInstallNatively: Boolean(selectInstallerAsset(data)),
       releaseNotes,
     };
   }));
 
-  ipcMain.handle('app:downloadAndInstall', async (): Promise<Result<true>> => safe(async () => {
-    await autoCheckAndPromptUpdate();
+  ipcMain.handle('app:downloadAndInstall', async (): Promise<Result<string>> => safe(async () => {
+    const data = await fetchLatestRelease();
+    if (!data) throw new Error('Could not reach release server.');
+    const current = app.getVersion();
+    const latestVersion = latestReleaseVersion(data);
+    if (!latestVersion) throw new Error('Latest release does not include a valid version number.');
+    if (compareVersions(latestVersion, current) <= 0) throw new Error(`You're already on the latest version (${current}).`);
+    return downloadAndLaunchInstaller(data);
+  }));
+
+  ipcMain.handle('app:notify', async (
+    _e,
+    args: { title: string; body: string }
+  ): Promise<Result<true>> => safe(async () => {
+    if (Notification.isSupported()) {
+      new Notification({
+        title: String(args.title || 'Debajyoti Drive'),
+        body: String(args.body || ''),
+      }).show();
+    }
     return true as const;
   }));
 

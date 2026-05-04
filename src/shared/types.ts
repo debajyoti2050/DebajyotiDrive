@@ -262,6 +262,7 @@ export interface GDriveConfig {
 export interface UpdateInfo {
   hasUpdate: boolean;
   latestVersion: string;
-  downloadUrl: string;
+  currentVersion: string;
+  canInstallNatively: boolean;
   releaseNotes?: string;
 }

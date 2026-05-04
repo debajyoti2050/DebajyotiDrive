@@ -88,7 +88,12 @@
     },
     "win": {
       "target": "nsis",
-      "icon": "assets/icon.ico"
+      "icon": "assets/icon.ico",
+      "publisherName": "Debajyoti",
+      "signAndEditExecutable": true,
+      "signDlls": true,
+      "rfc3161TimeStampServer": "http://timestamp.digicert.com",
+      "timeStampServer": "http://timestamp.digicert.com"
     },
     "nsis": {
       "installerIcon": "assets/icon.ico",

@@ -7,11 +7,12 @@ interface Props {
   onClose: () => void;
   onChanged: () => void;  // refresh parent after restore/delete
   onToast: (msg: string, kind?: 'info' | 'error' | 'success') => void;
+  onWatchRestore?: (watch: { key: string; storageClass: string; tier: string }) => void;
 }
 
 type RestoreTier = 'Standard' | 'Bulk' | 'Expedited';
 
-export const VersionsModal: React.FC<Props> = ({ objectKey, onClose, onChanged, onToast }) => {
+export const VersionsModal: React.FC<Props> = ({ objectKey, onClose, onChanged, onToast, onWatchRestore }) => {
   const [versions, setVersions] = useState<S3ObjectVersion[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [archiveStatus, setArchiveStatus] = useState<{
@@ -72,6 +73,7 @@ export const VersionsModal: React.FC<Props> = ({ objectKey, onClose, onChanged, 
     });
     setBusy(false);
     if (!res.ok) { onToast(res.error, 'error'); return; }
+    onWatchRestore?.({ key: objectKey, storageClass: archiveStatus?.storageClass || 'GLACIER', tier });
     onToast(`Restore initiated (${tier}). This can take minutes to hours.`, 'info');
     load();
   };

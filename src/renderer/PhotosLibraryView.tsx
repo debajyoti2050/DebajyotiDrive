@@ -192,19 +192,32 @@ export const PhotosLibraryView: React.FC<Props> = ({ connected, onToast }) => {
 
   const pickMedia = async () => {
     if (!connected) {
-      onToast('Connect a bucket first — open Settings to configure your S3 bucket.', 'info');
+      onToast('Connect a bucket first - open Settings to configure your S3 bucket.', 'info');
       return;
     }
-    if (!window.s3drive?.photos?.pickMedia) return;
+    if (!window.s3drive?.photos?.pickMedia) {
+      onToast('Photos upload is available in the Debajyoti Drive desktop app window.', 'error');
+      return;
+    }
     const res = await window.s3drive.photos.pickMedia();
     if (!res.ok) { onToast(res.error, 'error'); return; }
+    if (!res.value.length) return;
+    onToast(`${res.value.length} media item${res.value.length === 1 ? '' : 's'} ready to upload`, 'info');
     setUploadJobs(prev => mergePicked(prev.filter(job => !job.done || job.error), res.value));
   };
 
   const handleDrop = async (event: React.DragEvent) => {
     event.preventDefault();
+    event.stopPropagation();
     setIsDropHot(false);
-    if (!connected || !window.s3drive?.photos?.registerDroppedMedia) return;
+    if (!connected) {
+      onToast('Connect a bucket first - open Settings to configure your S3 bucket.', 'info');
+      return;
+    }
+    if (!window.s3drive?.photos?.registerDroppedMedia) {
+      onToast('Photos folder drop is available in the Debajyoti Drive desktop app window.', 'error');
+      return;
+    }
     const files = Array.from(event.dataTransfer.files);
     if (!files.length) return;
     const res = await window.s3drive.photos.registerDroppedMedia(files);
@@ -259,9 +272,11 @@ export const PhotosLibraryView: React.FC<Props> = ({ connected, onToast }) => {
       transition={{ duration: 0.32, ease: [0.25, 0.46, 0.45, 0.94] }}
       onDragOver={event => {
         event.preventDefault();
+        event.stopPropagation();
         if (connected) setIsDropHot(true);
       }}
       onDragLeave={event => {
+        event.stopPropagation();
         if (!event.currentTarget.contains(event.relatedTarget as Node)) setIsDropHot(false);
       }}
       onDrop={handleDrop}

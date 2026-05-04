@@ -7,7 +7,7 @@ import { AuroraBackground } from './AuroraBackground';
 import { CloudStorageModel } from './CloudStorageModel';
 import { PhotosLibraryView } from './PhotosLibraryView';
 import {
-  BarChartIcon, CloudUploadIcon, FolderIcon, FolderPlusIcon,
+  BarChartIcon, BellIcon, CloudUploadIcon, FolderIcon, FolderPlusIcon,
   GoogleDriveIcon, GridIcon, HistoryIcon, HomeIcon, ImageIcon, ListIcon,
   MoonIcon, MonitorIcon, SunIcon,
   getTileIcon, isPreviewable,
@@ -47,6 +47,46 @@ import { ChangeTierModal } from './ChangeTierModal';
 import { AWSStatusModal } from './AWSStatusModal';
 
 type Toast = { msg: string; kind: 'info' | 'error' | 'success' } | null;
+type AppNotification = {
+  id: string;
+  title: string;
+  body: string;
+  kind: 'info' | 'success' | 'warning';
+  createdAt: number;
+  key?: string;
+};
+type RestoreWatch = {
+  id: string;
+  key: string;
+  storageClass: string;
+  requestedAt: number;
+  tier?: string;
+  expiry?: string;
+};
+
+const NOTIFICATION_KEY = 's3drive_notifications';
+const RESTORE_WATCH_KEY = 's3drive_restore_watchlist';
+
+function readLocalList<T>(key: string): T[] {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? JSON.parse(raw) as T[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalList<T>(key: string, value: T[]): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Storage quota or privacy settings should not break the app shell.
+  }
+}
+
+function notificationTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
 
 export const App: React.FC = () => {
   // Multi-bucket state
@@ -127,11 +167,40 @@ export const App: React.FC = () => {
   const cancelledUploadRunsRef = useRef<Set<string>>(new Set());
   const [downloadJobs, setDownloadJobs] = useState<UploadJob[]>([]);
 
+  const [appVersion, setAppVersion] = useState('');
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateCheckError, setUpdateCheckError] = useState<string | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [notifications, setNotifications] = useState<AppNotification[]>(() => readLocalList<AppNotification>(NOTIFICATION_KEY));
+  const [notificationOpen, setNotificationOpen] = useState(false);
+  const [restoreWatch, setRestoreWatch] = useState<RestoreWatch[]>(() => readLocalList<RestoreWatch>(RESTORE_WATCH_KEY));
+  const restoreWatchRef = useRef<RestoreWatch[]>(restoreWatch);
+  const notifiedReadyRef = useRef<Set<string>>(new Set());
   const [toast, setToast] = useState<Toast>(null);
   const showToast = useCallback((msg: string, kind: 'info' | 'error' | 'success' = 'info') => {
     setToast({ msg, kind });
     setTimeout(() => setToast(null), 3500);
+  }, []);
+
+  const pushNotification = useCallback((entry: Omit<AppNotification, 'id' | 'createdAt'>) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setNotifications(prev => [
+      { ...entry, id, createdAt: Date.now() },
+      ...prev,
+    ].slice(0, 50));
+  }, []);
+
+  const watchRestore = useCallback((watch: { key: string; storageClass: string; tier?: string }) => {
+    setRestoreWatch(prev => {
+      const next: RestoreWatch = {
+        id: watch.key,
+        key: watch.key,
+        storageClass: watch.storageClass,
+        tier: watch.tier,
+        requestedAt: Date.now(),
+      };
+      return [next, ...prev.filter(item => item.key !== watch.key)].slice(0, 30);
+    });
   }, []);
 
   // Boot
@@ -166,12 +235,44 @@ export const App: React.FC = () => {
 
   // Check for updates on startup
   useEffect(() => {
-    const check = window.s3drive?.app?.checkUpdate;
-    if (!check) return;
-    check().then(res => {
-      if (res.ok && res.value.hasUpdate) setUpdateInfo(res.value);
+    const appApi = window.s3drive?.app;
+    if (!appApi) return;
+
+    appApi.version?.().then(res => {
+      if (res.ok) setAppVersion(res.value);
+    }).catch(() => {});
+
+    appApi.checkUpdate?.().then(res => {
+      if (res.ok) {
+        setUpdateInfo(res.value);
+        setAppVersion(res.value.currentVersion);
+        setUpdateCheckError(null);
+      } else {
+        setUpdateCheckError(res.error);
+      }
     }).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    writeLocalList(NOTIFICATION_KEY, notifications);
+  }, [notifications]);
+
+  useEffect(() => {
+    restoreWatchRef.current = restoreWatch;
+    writeLocalList(RESTORE_WATCH_KEY, restoreWatch);
+  }, [restoreWatch]);
+
+  const installUpdate = useCallback(async () => {
+    if (!updateInfo?.hasUpdate || updateBusy) return;
+    setUpdateBusy(true);
+    const res = await window.s3drive.app.downloadAndInstall();
+    setUpdateBusy(false);
+    if (!res.ok) {
+      showToast(res.error, 'error');
+      return;
+    }
+    showToast('Installer launched. The app will close to finish the update.', 'success');
+  }, [showToast, updateBusy, updateInfo]);
 
   // Upload progress
   useEffect(() => {
@@ -204,6 +305,45 @@ export const App: React.FC = () => {
       }
     });
   }, [config]);
+
+  // Background archive restore watcher. S3 exposes readiness via x-amz-restore,
+  // so we poll watched objects and notify once the temporary copy is available.
+  useEffect(() => {
+    if (!config || !window.s3drive?.s3?.checkRestoreStatus) return;
+    let alive = true;
+
+    const poll = async () => {
+      const watches = restoreWatchRef.current;
+      if (!watches.length) return;
+
+      for (const watch of watches) {
+        const res = await window.s3drive.s3.checkRestoreStatus({ key: watch.key });
+        if (!alive) return;
+        if (!res.ok || res.value.ongoing || !res.value.expiry || notifiedReadyRef.current.has(watch.key)) continue;
+
+        notifiedReadyRef.current.add(watch.key);
+        setRestoreWatch(prev => prev.filter(item => item.key !== watch.key));
+        const filename = basename(watch.key);
+        const body = `${filename} is ready to download. Available until ${new Date(res.value.expiry).toLocaleDateString()}.`;
+        pushNotification({
+          title: 'Archive ready',
+          body,
+          kind: 'success',
+          key: watch.key,
+        });
+        showToast(`Archive ready: ${filename}`, 'success');
+        void window.s3drive.app.notify?.({ title: 'Archive ready', body });
+      }
+    };
+
+    const first = window.setTimeout(poll, 2500);
+    const interval = window.setInterval(poll, 60_000);
+    return () => {
+      alive = false;
+      window.clearTimeout(first);
+      window.clearInterval(interval);
+    };
+  }, [config, pushNotification, showToast]);
 
   // Live clock — ticks every minute
   useEffect(() => {
@@ -517,9 +657,9 @@ export const App: React.FC = () => {
     showToast(`Cancelled ${cancellable.length} upload${cancellable.length === 1 ? '' : 's'}`, 'info');
   };
 
-  const downloadFile = async (key: string) => {
+  const downloadFile = async (key: string, options?: { bypassArchiveCheck?: boolean }) => {
     const obj = (searchResults ?? files).find(f => f.key === key);
-    if (obj) {
+    if (obj && !options?.bypassArchiveCheck) {
       const info = STORAGE_CLASSES.find(c => c.id === obj.storageClass);
       if (info && !info.instantRetrieve) { setRestoreTarget({ key, storageClass: obj.storageClass }); return; }
     }
@@ -639,6 +779,7 @@ export const App: React.FC = () => {
     }).filter(t => t.bytes > 0);
     return { total, byTier, fileCount: files.length, folderCount: folders.length };
   }, [files, folders]);
+  const notificationCount = notifications.length + restoreWatch.length;
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -666,6 +807,18 @@ export const App: React.FC = () => {
                 {formatBytes(bucketBytes)} used
               </motion.span>
             )}
+            {bucketAnalytics && (
+              <motion.span
+                className="titlebar-cost-pill"
+                initial={{ opacity: 0, scale: 0.8, x: -8 }}
+                animate={{ opacity: 1, scale: 1, x: 0 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                transition={{ type: 'spring', damping: 20, stiffness: 280 }}
+                title={`Estimated monthly storage cost for ${bucketAnalytics.region}. Pricing source: ${bucketAnalytics.pricingSource}.`}
+              >
+                {formatINR(bucketAnalytics.estimatedMonthlyCost)}/mo est.
+              </motion.span>
+            )}
           </AnimatePresence>
         </motion.div>
         <motion.div
@@ -684,20 +837,43 @@ export const App: React.FC = () => {
               {config.profile && ` · ${config.profile}`}
             </div>
           ) : null}
-          {/* Update available badge */}
-          {updateInfo && (
+          {/* Version / update badge */}
+          {updateInfo?.hasUpdate ? (
             <motion.button
               className="update-badge"
-              onClick={() => window.s3drive.shell.openExternal(updateInfo.downloadUrl)}
-              title={updateInfo.releaseNotes ? `What's new:\n${updateInfo.releaseNotes}` : `Download v${updateInfo.latestVersion}`}
+              onClick={installUpdate}
+              disabled={updateBusy}
+              title={updateInfo.releaseNotes
+                ? `Current v${updateInfo.currentVersion}. Install v${updateInfo.latestVersion}.\n\nWhat's new:\n${updateInfo.releaseNotes}`
+                : `Current v${updateInfo.currentVersion}. Install v${updateInfo.latestVersion}.`}
               initial={{ opacity: 0, scale: 0.85 }}
               animate={{ opacity: [0.85, 1, 0.85], scale: 1 }}
               transition={{ opacity: { duration: 2.2, repeat: Infinity }, scale: { duration: 0.3 } }}
               whileHover={{ scale: 1.06 }}
               whileTap={{ scale: 0.94 }}
             >
-              ↑ v{updateInfo.latestVersion} available
+              {updateBusy ? 'Installing...' : `Install v${updateInfo.latestVersion}`}
             </motion.button>
+          ) : (
+            <motion.span
+              className={`version-badge${updateInfo && !updateInfo.hasUpdate ? ' latest' : ''}${updateCheckError ? ' warning' : ''}`}
+              title={updateCheckError
+                ? `Running v${appVersion || 'unknown'}. Update check failed: ${updateCheckError}`
+                : updateInfo
+                  ? `Running v${updateInfo.currentVersion}. Latest release is v${updateInfo.latestVersion || updateInfo.currentVersion}.`
+                  : `Running v${appVersion || 'unknown'}. Checking for updates...`}
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.22 }}
+            >
+              {updateCheckError
+                ? `v${appVersion || 'unknown'}`
+                : updateInfo && !updateInfo.hasUpdate
+                  ? `v${updateInfo.currentVersion} latest`
+                  : appVersion
+                    ? `v${appVersion}`
+                    : 'checking version'}
+            </motion.span>
           )}
 
           {/* Powered by AWS badge */}
@@ -1642,6 +1818,16 @@ export const App: React.FC = () => {
 
         {/* Right: transfer activity + view mode + clock */}
         <span className="statusbar-right">
+          <motion.button
+            className={`statusbar-notification-btn${notificationCount > 0 ? ' has-items' : ''}`}
+            onClick={() => setNotificationOpen(open => !open)}
+            title="Notifications"
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.92 }}
+          >
+            <BellIcon size={13} />
+            {notificationCount > 0 && <span className="notification-count">{notificationCount}</span>}
+          </motion.button>
           {/* AWS health status badge */}
           <motion.button
             className="statusbar-aws-btn"
@@ -1721,6 +1907,81 @@ export const App: React.FC = () => {
       </AnimatePresence>
 
       <AnimatePresence>
+        {notificationOpen && (
+          <motion.div
+            key="notification-tray"
+            className="notification-tray"
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 18, scale: 0.96 }}
+            transition={{ type: 'spring', damping: 24, stiffness: 320 }}
+          >
+            <div className="notification-tray-head">
+              <div>
+                <strong>Notifications</strong>
+                <span>{restoreWatch.length} archive restore{restoreWatch.length === 1 ? '' : 's'} being watched</span>
+              </div>
+              <button
+                onClick={() => {
+                  setNotifications([]);
+                  notifiedReadyRef.current.clear();
+                }}
+                disabled={!notifications.length}
+              >
+                Clear
+              </button>
+            </div>
+
+            {restoreWatch.length > 0 && (
+              <div className="notification-watch-list">
+                {restoreWatch.map(watch => (
+                  <div key={watch.key} className="notification-watch">
+                    <span />
+                    <div>
+                      <strong title={watch.key}>{basename(watch.key)}</strong>
+                      <small>{watch.storageClass.replace(/_/g, ' ')} restore queued{watch.tier ? ` · ${watch.tier}` : ''}</small>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {notifications.length === 0 && restoreWatch.length === 0 ? (
+              <div className="notification-empty">
+                <BellIcon size={18} />
+                <span>No notifications yet</span>
+              </div>
+            ) : (
+              <div className="notification-list">
+                {notifications.map(item => (
+                  <div key={item.id} className={`notification-row ${item.kind}`}>
+                    <div className="notification-row-main">
+                      <div className="notification-row-title">
+                        <strong>{item.title}</strong>
+                        <time>{notificationTime(item.createdAt)}</time>
+                      </div>
+                      <p>{item.body}</p>
+                    </div>
+                    {item.key && (
+                      <button
+                        className="notification-download"
+                        onClick={() => {
+                          setNotificationOpen(false);
+                          void downloadFile(item.key!, { bypassArchiveCheck: true });
+                        }}
+                      >
+                        Download
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {showSettings && (
           <motion.div key="settings" className="modal-anim-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
             <SettingsModal
@@ -1769,7 +2030,7 @@ export const App: React.FC = () => {
       <AnimatePresence>
         {versionsKey && (
           <motion.div key="versions" className="modal-anim-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-            <VersionsModal objectKey={versionsKey} onClose={() => setVersionsKey(null)} onChanged={refresh} onToast={showToast} />
+            <VersionsModal objectKey={versionsKey} onClose={() => setVersionsKey(null)} onChanged={refresh} onToast={showToast} onWatchRestore={watchRestore} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -1801,6 +2062,7 @@ export const App: React.FC = () => {
           storageClass={restoreTarget.storageClass}
           onClose={() => setRestoreTarget(null)}
           onToast={showToast}
+          onWatchRestore={watchRestore}
           onDownload={async () => {
             setRestoreTarget(null);
             const res = await window.s3drive.s3.download({ key: restoreTarget.key });

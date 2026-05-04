@@ -129,7 +129,9 @@ const api = {
   app: {
     version: (): Promise<Result<string>> => ipcRenderer.invoke('app:version'),
     checkUpdate: (): Promise<Result<UpdateInfo>> => ipcRenderer.invoke('app:checkUpdate'),
-    downloadAndInstall: (): Promise<Result<true>> => ipcRenderer.invoke('app:downloadAndInstall'),
+    downloadAndInstall: (): Promise<Result<string>> => ipcRenderer.invoke('app:downloadAndInstall'),
+    notify: (args: { title: string; body: string }): Promise<Result<true>> =>
+      ipcRenderer.invoke('app:notify', args),
   },
   gdrive: {
     init: (cfg: GDriveConfig): Promise<Result<true>> =>

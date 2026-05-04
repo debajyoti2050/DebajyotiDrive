@@ -7,6 +7,7 @@ interface Props {
   onClose: () => void;
   onToast: (msg: string, kind?: 'info' | 'error' | 'success') => void;
   onDownload: () => void;
+  onWatchRestore?: (watch: { key: string; storageClass: string; tier: string }) => void;
 }
 
 type Tier = 'Expedited' | 'Standard' | 'Bulk';
@@ -21,7 +22,7 @@ const DEEP_TIERS: { id: Tier; label: string; time: string; note: string }[] = [
   { id: 'Bulk',     label: 'Bulk',     time: 'Up to 48h',  note: 'Cheapest' },
 ];
 
-export const RestoreModal: React.FC<Props> = ({ objectKey, storageClass, onClose, onToast, onDownload }) => {
+export const RestoreModal: React.FC<Props> = ({ objectKey, storageClass, onClose, onToast, onDownload, onWatchRestore }) => {
   const [status, setStatus] = useState<{ ongoing: boolean; expiry?: string } | null>(null);
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [tier, setTier] = useState<Tier>('Standard');
@@ -49,6 +50,7 @@ export const RestoreModal: React.FC<Props> = ({ objectKey, storageClass, onClose
     });
     setRestoring(false);
     if (!res.ok) { onToast(res.error, 'error'); return; }
+    onWatchRestore?.({ key: objectKey, storageClass, tier });
     onToast(`Restore initiated for "${filename}". Check back in ${tiers.find(t => t.id === tier)?.time}.`, 'success');
     onClose();
   };
