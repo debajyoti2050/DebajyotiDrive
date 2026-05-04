@@ -1,6 +1,6 @@
 {
   "name": "s3drive",
-  "version": "0.1.0",
+  "version": "0.1.7",
   "description": "A Drive-like desktop client for Amazon S3 with per-upload storage class control",
   "main": "dist/main/index.js",
   "author": {
@@ -89,11 +89,15 @@
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico",
-      "publisherName": "Debajyoti",
       "signAndEditExecutable": true,
-      "signDlls": true,
-      "rfc3161TimeStampServer": "http://timestamp.digicert.com",
-      "timeStampServer": "http://timestamp.digicert.com"
+      "signExts": [
+        ".dll"
+      ],
+      "signtoolOptions": {
+        "publisherName": "Debajyoti",
+        "rfc3161TimeStampServer": "http://timestamp.digicert.com",
+        "timeStampServer": "http://timestamp.digicert.com"
+      }
     },
     "nsis": {
       "installerIcon": "assets/icon.ico",
